@@ -11,7 +11,7 @@ pub enum Out {
 }
 
 pub fn usage() -> String {
-    format!(r#"huddle [<command> [args]]   (prints JSON; board file: {})
+    format!(r##"huddle [<command> [args]]   (prints JSON; board file: {})
   (no command, in a terminal)                 open the interactive board
   mcp                                         serve these commands as MCP tools over stdio (Claude connects to it)
   add "<title>" [--project p] [--due d] [--priority urgent|high|normal|low] [--status s] [--desc text]
@@ -19,14 +19,15 @@ pub fn usage() -> String {
   update <id> [--title t] [--due d|none] [--priority p] [--project p] [--desc text] [--delete] [--restore]
   list [--status s|open|all] [--project p] [--query words] [--due-before d]
   note "<text>" [--kind note|decision|report] [--task id] [--project p]
-  project add <slug> [path]    (path defaults to the current folder; its git commits feed the stand-up)
+  project add <slug> [path] [--no-hook]   (path defaults to the current folder; its git commits feed the stand-up,
+                               and a post-commit hook moves tasks named in commits: "#12" starts it, "fixes #12" finishes it)
   project list
   facts last_workday|today|week
-dates: 2026-10-31, 2026-10-31T09:30, today, tomorrow 9:30, fri, +2h"#, board::db_file(), board::STATUSES.join(", "))
+dates: 2026-10-31, 2026-10-31T09:30, today, tomorrow 9:30, fri, +2h"##, board::db_file(), board::STATUSES.join(", "))
 }
 
 const VALUES: [&str; 11] = ["project", "due", "priority", "status", "desc", "reason", "title", "query", "due-before", "kind", "task"];
-const FLAGS: [&str; 3] = ["delete", "restore", "help"];
+const FLAGS: [&str; 4] = ["delete", "restore", "help", "no-hook"];
 
 /// Splits argv into positionals and --options, the way the Node version's parseArgs did.
 fn parse(args: &[String]) -> Result<(Vec<String>, HashMap<String, String>)> {
@@ -85,12 +86,13 @@ pub fn run(args: &[String], db: &Connection) -> Result<Out> {
         Some("project") => match arg(1) {
             Some("add") => {
                 let path = std::path::absolute(arg(3).unwrap_or("."))?;
-                json(board::add_project(db, need(arg(2), "project slug")?, &path.to_string_lossy())?)
+                json(crate::hooks::add_project(db, need(arg(2), "project slug")?, &path, o("no-hook").is_none())?)
             }
             Some("list") => json(board::list_projects(db)?.into_iter().map(|(slug, path)| serde_json::json!({ "slug": slug, "path": path })).collect()),
             _ => err(format!("project add|list\n\n{}", usage())),
         },
         Some("facts") => json(board::facts(db, need(arg(1), "period")?, now())?),
+        Some("hook") => Ok(Out::Text(crate::hooks::run(db, arg(1), now())?)),
         Some("help") | None => Ok(Out::Text(usage())),
         Some(cmd) => err(format!("unknown command \"{cmd}\"\n\n{}", usage())),
     }

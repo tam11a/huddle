@@ -1,0 +1,12 @@
+{
+  "description": "Shows Claude what's in flight on the huddle board when a session starts",
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          { "type": "command", "command": "huddle hook session 2>/dev/null || huddle.cmd hook session 2>/dev/null || true", "timeout": 10 }
+        ]
+      }
+    ]
+  }
+}

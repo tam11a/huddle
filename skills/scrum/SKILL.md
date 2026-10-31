@@ -25,7 +25,7 @@ Priorities: `urgent`, `high`, `normal`, `low`. Dates: `2026-10-31`, `2026-10-31T
 - **Keep the board true while you work.** When you start, finish, hand off for review or get blocked on work that matches a task on the board, move that task and say so in one line.
 - Pass the id the user gives (`#12`, `12`) straight to `move_task` or `update_task`; there's no need to look it up first.
 - Titles are short and start with a verb.
-- If the current folder is a git repo that isn't registered (`list_projects`), offer once to register it, so its commits show up in stand-ups.
+- If the current folder is a git repo that isn't registered (`list_projects`), offer once to register it, so its commits show up in stand-ups. Registering adds a post-commit hook: a commit naming `#12` starts that task, `fixes #12` finishes it.
 - Ask before creating or changing more than one task at a time.
 - If the user wants to see the whole board, tell them to run `huddle` with no arguments in their terminal.
 

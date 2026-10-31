@@ -2,6 +2,7 @@
 // and no command opens the board.
 mod board;
 mod cli;
+mod hooks;
 mod mcp;
 mod time;
 mod tui;

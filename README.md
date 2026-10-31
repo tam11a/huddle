@@ -22,7 +22,8 @@ Tell Claude what you're working on, and it keeps the board for you. Each morning
 - **End of day:** an 8-line summary saved as a report; the next stand-up reads it.
 - **Weekly review:** what got done, what slipped, and the top 5 for next week.
 - **Plan from a document:** turns a spec or brief into proposed tasks, and creates them only after you say yes.
-- **Git-aware:** register a repo once, and your commits there show up in stand-ups.
+- **Git-aware:** register a repo once (`huddle project add <slug>`), and your commits there show up in stand-ups. It also adds a post-commit hook: a commit that names `#12` starts that task, and `fixes #12` finishes it. Only tasks of that repo's project move, so GitHub issue numbers elsewhere are safe.
+- **Keeps Claude up to date:** when a Claude Code session starts, Claude sees what's in doing, blocked, in review and overdue, and whether the folder is a huddle project.
 
 Claude writes the words, but every fact comes from the board, so it can't invent tasks.
 

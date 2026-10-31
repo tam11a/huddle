@@ -86,7 +86,7 @@ fn call(db: &Connection, name: &str, a: &Value) -> Result<Value> {
                 Some(p) => std::path::absolute(p)?,
                 None => std::env::current_dir()?,
             };
-            board::add_project(db, &need("slug")?, &path.to_string_lossy())?
+            crate::hooks::add_project(db, &need("slug")?, &path, a["hook"].as_bool() != Some(false))?
         }
         "list_projects" => board::list_projects(db)?.into_iter().map(|(slug, path)| json!({ "slug": slug, "path": path })).collect(),
         "facts" => board::facts(db, &need("period")?, n)?,
@@ -159,10 +159,11 @@ fn tools() -> Value {
         },
         {
             "name": "add_project",
-            "description": "Register a git repo so the user's commits there show up in stand-ups.",
+            "description": "Register a git repo so the user's commits there show up in stand-ups. It also adds a post-commit hook: a commit naming #12 starts that task, \"fixes #12\" finishes it.",
             "inputSchema": { "type": "object", "required": ["slug"], "properties": {
                 "slug": text("Short name: a-z, 0-9, . _ -"),
                 "path": text("The repo folder; defaults to the folder Claude is working in"),
+                "hook": { "type": "boolean", "description": "Add the post-commit hook; defaults to true" },
             }},
         },
         {
