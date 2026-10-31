@@ -45,7 +45,7 @@ pub fn err<T>(msg: impl Into<String>) -> Result<T> {
 // ---------- db ----------
 
 pub fn db_file() -> String {
-    if let Ok(f) = env::var("SCRUM_DB") {
+    if let Some(f) = env::var("SCRUM_DB").ok().filter(|f| !f.is_empty()) {
         return f;
     }
     let home = env::var_os("HOME").or_else(|| env::var_os("USERPROFILE")).map(PathBuf::from).unwrap_or_default();

@@ -13,6 +13,7 @@ pub enum Out {
 pub fn usage() -> String {
     format!(r#"huddle [<command> [args]]   (prints JSON; board file: {})
   (no command, in a terminal)                 open the interactive board
+  mcp                                         serve these commands as MCP tools over stdio (Claude connects to it)
   add "<title>" [--project p] [--due d] [--priority urgent|high|normal|low] [--status s] [--desc text]
   move <id> <status> [--reason text]          statuses: {} (blocked needs --reason)
   update <id> [--title t] [--due d|none] [--priority p] [--project p] [--desc text] [--delete] [--restore]

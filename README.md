@@ -36,14 +36,26 @@ cargo install --git https://github.com/tam11a/huddle
 
 While the repo is private, cargo needs your git login: run it with `CARGO_NET_GIT_FETCH_WITH_CLI=true` in front.
 
-Then add the skill. As a plugin, inside Claude Code:
+Then add the plugin inside Claude Code. It brings the `scrum` skill and connects Claude to the board through `huddle mcp`, an MCP server with tools like `add_task`, `move_task`, `list_tasks` and `facts`:
 
 ```
 /plugin marketplace add tam11a/huddle
 /plugin install huddle@huddle
 ```
 
-Or as a plain skill:
+Claude then keeps the board true as it works: when it starts, finishes or gets blocked on a task that's on the board, it moves the task and says so.
+
+To use the board from another MCP client (Claude Desktop, or Claude Code without the plugin), point it at `huddle mcp`:
+
+```bash
+claude mcp add -s user huddle -- huddle mcp
+```
+
+```json
+{ "mcpServers": { "huddle": { "command": "huddle", "args": ["mcp"] } } }
+```
+
+Or add just the skill, which runs `huddle` commands instead of the tools:
 
 ```bash
 git clone https://github.com/tam11a/huddle && cp -r huddle/skills/scrum ~/.claude/skills/

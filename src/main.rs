@@ -1,6 +1,8 @@
-// huddle: a personal scrum board for Claude Code. One binary: commands print JSON for Claude, no command opens the board.
+// huddle: a personal scrum board for Claude Code. One binary: commands print JSON, `mcp` serves them as MCP tools,
+// and no command opens the board.
 mod board;
 mod cli;
+mod mcp;
 mod time;
 mod tui;
 mod ui;
@@ -12,6 +14,8 @@ fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let out = if args.is_empty() && std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
         tui::main().map(|_| None)
+    } else if args == ["mcp"] {
+        board::open_db(&board::db_file()).and_then(|db| mcp::serve(&db)).map(|_| None)
     } else {
         board::open_db(&board::db_file()).and_then(|db| cli::run(&args, &db)).map(Some)
     };
