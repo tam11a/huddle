@@ -1,0 +1,119 @@
+// The commands Claude runs. Each prints JSON (or the usage text).
+use crate::board::{self, Error, Filter, NewTask, Patch, Result, err};
+use crate::time::now;
+use rusqlite::Connection;
+use serde_json::Value;
+use std::collections::HashMap;
+
+pub enum Out {
+    Text(String),
+    Json(Value),
+}
+
+pub fn usage() -> String {
+    format!(r#"huddle [<command> [args]]   (prints JSON; board file: {})
+  (no command, in a terminal)                 open the interactive board
+  add "<title>" [--project p] [--due d] [--priority urgent|high|normal|low] [--status s] [--desc text]
+  move <id> <status> [--reason text]          statuses: {} (blocked needs --reason)
+  update <id> [--title t] [--due d|none] [--priority p] [--project p] [--desc text] [--delete] [--restore]
+  list [--status s|open|all] [--project p] [--query words] [--due-before d]
+  note "<text>" [--kind note|decision|report] [--task id] [--project p]
+  project add <slug> [path]    (path defaults to the current folder; its git commits feed the stand-up)
+  project list
+  facts last_workday|today|week
+dates: 2026-10-31, 2026-10-31T09:30, today, tomorrow 9:30, fri, +2h"#, board::db_file(), board::STATUSES.join(", "))
+}
+
+const VALUES: [&str; 11] = ["project", "due", "priority", "status", "desc", "reason", "title", "query", "due-before", "kind", "task"];
+const FLAGS: [&str; 3] = ["delete", "restore", "help"];
+
+/// Splits argv into positionals and --options, the way the Node version's parseArgs did.
+fn parse(args: &[String]) -> Result<(Vec<String>, HashMap<String, String>)> {
+    let (mut pos, mut opt) = (vec![], HashMap::new());
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        let Some(name) = a.strip_prefix("--").or(if a == "-h" { Some("help") } else { None }) else {
+            pos.push(a.clone());
+            continue;
+        };
+        if name.is_empty() {
+            pos.extend(it.by_ref().cloned());
+            break;
+        }
+        let (name, inline) = name.split_once('=').map_or((name, None), |(n, v)| (n, Some(v.to_string())));
+        if VALUES.contains(&name) {
+            let v = inline.or_else(|| it.next().cloned()).ok_or_else(|| Error(format!("--{name} needs a value")))?;
+            opt.insert(name.to_string(), v);
+        } else if FLAGS.contains(&name) && inline.is_none() {
+            opt.insert(name.to_string(), String::new());
+        } else {
+            return err(format!("unknown option --{name}\n\n{}", usage()));
+        }
+    }
+    Ok((pos, opt))
+}
+
+fn need<'a>(v: Option<&'a str>, what: &str) -> Result<&'a str> {
+    v.filter(|v| !v.is_empty()).ok_or_else(|| Error(format!("missing {what}\n\n{}", usage())))
+}
+
+pub fn run(args: &[String], db: &Connection) -> Result<Out> {
+    let (p, o) = parse(args)?;
+    let o = |k: &str| o.get(k).map(String::as_str);
+    let arg = |i: usize| p.get(i).map(String::as_str);
+    let rest = p.get(1..).unwrap_or_default().join(" ");
+    let rest = rest.as_str();
+    let json = |v: Value| Ok(Out::Json(v));
+    let task = |t: board::Task| json(t.view());
+
+    match if o("help").is_some() { Some("help") } else { arg(0) } {
+        Some("add") => task(board::add_task(db, &NewTask {
+            title: need(Some(rest), "title")?, project: o("project"), due: o("due"), priority: o("priority"), status: o("status"), description: o("desc"),
+        }, now())?),
+        Some("move") => task(board::update_task(db, need(arg(1), "task id")?, &Patch {
+            status: Some(need(arg(2), "status")?), blocked_reason: o("reason"), ..Default::default()
+        }, now())?),
+        Some("update") => task(board::update_task(db, need(arg(1), "task id")?, &Patch {
+            title: o("title"), due: o("due"), priority: o("priority"), project: o("project"), status: o("status"),
+            blocked_reason: o("reason"), description: o("desc"), delete: o("delete").is_some(), restore: o("restore").is_some(),
+        }, now())?),
+        Some("list") => json(board::list_tasks(db, &Filter {
+            status: o("status"), project: o("project"), query: o("query"), due_before: o("due-before"), limit: Some(50), ..Default::default()
+        }, now())?.iter().map(board::Task::view).collect()),
+        Some("note") => json(board::add_note(db, need(Some(rest), "note text")?, o("kind"), o("task"), o("project"), now())?),
+        Some("project") => match arg(1) {
+            Some("add") => {
+                let path = std::path::absolute(arg(3).unwrap_or("."))?;
+                json(board::add_project(db, need(arg(2), "project slug")?, &path.to_string_lossy())?)
+            }
+            Some("list") => json(board::list_projects(db)?.into_iter().map(|(slug, path)| serde_json::json!({ "slug": slug, "path": path })).collect()),
+            _ => err(format!("project add|list\n\n{}", usage())),
+        },
+        Some("facts") => json(board::facts(db, need(arg(1), "period")?, now())?),
+        Some("help") | None => Ok(Out::Text(usage())),
+        Some(cmd) => err(format!("unknown command \"{cmd}\"\n\n{}", usage())),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn run_(db: &Connection, args: &[&str]) -> Result<Value> {
+        match run(&args.iter().map(|a| a.to_string()).collect::<Vec<_>>(), db)? {
+            Out::Json(v) => Ok(v),
+            Out::Text(t) => Ok(Value::String(t)),
+        }
+    }
+
+    #[test]
+    fn run_parses_commands() {
+        let db = board::open_db(":memory:").unwrap();
+        assert_eq!(run_(&db, &["add", "Write", "docs", "--priority", "low"]).unwrap()["title"], "Write docs");
+        assert_eq!(run_(&db, &["move", "#1", "review"]).unwrap()["status"], "review");
+        assert_eq!(run_(&db, &["list", "--status=review"]).unwrap().as_array().unwrap().len(), 1);
+        assert!(run_(&db, &["move", "#1"]).unwrap_err().0.contains("missing status"));
+        assert!(run_(&db, &["list", "--bogus"]).unwrap_err().0.contains("unknown option"));
+        assert!(run_(&db, &["--help"]).unwrap().as_str().unwrap().starts_with("huddle"));
+    }
+}

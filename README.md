@@ -28,9 +28,15 @@ Claude writes the words, but every fact comes from the board, so it can't invent
 
 ## Install
 
-You need Node.js 22.13 or newer. There are no packages to install.
+First install the `huddle` command, one small binary with SQLite built in. You need [Rust](https://rustup.rs) to build it:
 
-As a plugin, inside Claude Code:
+```bash
+cargo install --git https://github.com/tam11a/huddle
+```
+
+While the repo is private, cargo needs your git login: run it with `CARGO_NET_GIT_FETCH_WITH_CLI=true` in front.
+
+Then add the skill. As a plugin, inside Claude Code:
 
 ```
 /plugin marketplace add tam11a/huddle
@@ -59,28 +65,21 @@ The schema is the same as Charlie Lite's, so `SCRUM_DB` can also point at a Char
 
 ## The board in your terminal
 
-To see the board, or fix it by hand, install the `huddle` command once and run it:
-
-```bash
-npm i -g github:tam11a/huddle
-huddle
-```
-
-It shows one column per status (done shows only today's), with overdue tasks in red and tasks due today in yellow. It uses the same file and rules as Claude, and refreshes every 2 seconds, so you can watch Claude change it.
+To see the board, or fix it by hand, run `huddle` with no arguments. It shows one column per status (done shows only today's), with overdue tasks in red and tasks due today in yellow. It uses the same file and rules as Claude, and refreshes every 2 seconds, so you can watch Claude change it.
 
 Keys: arrows or `hjkl` to pick a task, `<` `>` to move it along backlog → todo → doing → review → done, `d` done, `b` block (asks for the reason; on a blocked task, unblocks it), `a` add, `e` edit the title, `t` set the due date, `p` raise the priority, `x` delete, `s` today's facts, `q` quit.
 
-## The script
+## The commands
 
-Claude drives `skills/scrum/scripts/scrum.mjs`, and you can run it yourself too:
+Claude drives `huddle` through commands that print JSON, and you can run them yourself too:
 
 ```bash
-node skills/scrum/scripts/scrum.mjs --help
-node skills/scrum/scripts/scrum.mjs add "Write the API docs" --due fri --priority high
-node skills/scrum/scripts/scrum.mjs facts today
+huddle --help
+huddle add "Write the API docs" --due fri --priority high
+huddle facts today
 ```
 
-Tests: `npm test`.
+Build and test from a clone: `cargo build --release`, `cargo test`.
 
 ## License
 

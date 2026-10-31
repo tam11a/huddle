@@ -5,13 +5,13 @@ description: Personal scrum board and stand-up assistant. Use when the user want
 
 # Scrum
 
-The board lives in one SQLite file, managed by `scripts/scrum.mjs` in this skill's folder. Run it with Node (22.13 or newer):
+The board lives in one SQLite file, managed by the `huddle` command:
 
 ```bash
-node <this skill's folder>/scripts/scrum.mjs <command> [args]
+huddle <command> [args]
 ```
 
-It prints JSON. Run it with `--help` for the full usage. The commands:
+It prints JSON. Run `huddle --help` for the full usage. If `huddle` isn't installed, tell the user to install it with `cargo install --git https://github.com/tam11a/huddle` and stop. The commands:
 
 | Command | What it does |
 |---|---|
@@ -32,6 +32,7 @@ Dates: `2026-10-31`, `2026-10-31T09:30`, `today`, `tomorrow 9:30`, `fri`, `+2h`.
 - Titles are short and start with a verb.
 - If the current folder is a git repo that isn't registered (`project list`), offer once to register it, so its commits show up in stand-ups.
 - Ask before creating or changing more than one task at a time.
+- If the user wants to see the whole board, tell them to run `huddle` with no arguments in their terminal.
 
 ## Rituals
 
