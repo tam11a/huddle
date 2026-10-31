@@ -201,10 +201,13 @@ fn undo(s: &mut State, db: &Connection, now: i64) -> Result<()> {
             let cur = board::get_task(db, p.id)?;
             let (priority, project) = (p.priority.to_string(), p.project.clone().unwrap_or_default());
             let due = p.due_at.map_or("none".into(), crate::time::fmt_local_iso);
+            let or_none = |v: Option<String>| v.unwrap_or_else(|| "none".into());
+            let (sprint, points) = (or_none(p.sprint_id.map(|i| i.to_string())), or_none(p.points.map(|n| n.to_string())));
+            let (parent, recur, tags) = (or_none(p.parent_id.map(|i| i.to_string())), or_none(p.recur.clone()), p.tags.join(","));
             let t = board::update_task(db, &p.id.to_string(), &Patch {
                 status: Some(&p.status), blocked_reason: p.blocked_reason.as_deref(), title: Some(&p.title), description: Some(&p.description),
                 priority: Some(&priority), due: Some(&due), project: Some(&project), restore: cur.deleted_at.is_some() && p.deleted_at.is_none(),
-                delete: false, ..Default::default()
+                delete: false, sprint: Some(&sprint), points: Some(&points), parent: Some(&parent), recur: Some(&recur), tags: Some(&tags),
             }, now)?;
             follow(s, db, t.id, now)?;
             s.msg = format!("{} {}: undone", fmt_id(t.id), t.title);
@@ -374,7 +377,10 @@ fn board_key(s: &mut State, k: &str, db: &Connection, now: i64) -> Result<()> {
                     let label = format!("Project ({}; empty clears)", if known.is_empty() { "none registered".into() } else { known.join(", ") });
                     ask(s, &label, t.project.as_deref().unwrap_or(""), Action::Project(t.id));
                 }
-                "n" => ask(s, "Points (a number; none clears)", &t.points.map(|p| p.to_string()).unwrap_or_default(), Action::Points(t.id)),
+                "n" => {
+                    let now_pts = t.points.map_or("none".into(), |p| p.to_string());
+                    ask(s, &format!("Points (now {now_pts}; a number, or none to clear)"), "", Action::Points(t.id));
+                }
                 "g" => ask(s, "Tags (comma-separated; empty clears)", &t.tags.join(", "), Action::Tags(t.id)),
                 "f" => {
                     board::start_timer(db, &t.id.to_string(), now)?; // also moves backlog/todo to doing
@@ -562,6 +568,10 @@ mod tests {
         keys(&mut s, &db, &["return"]);
         let t = board::get_task(&db, 1).unwrap();
         assert_eq!((t.points, t.tags.clone()), (Some(5), vec!["bug".to_string(), "ui".to_string()]));
+        keys(&mut s, &db, &["u"]); // undo brings the old tags back, and keeps the points and sprint
+        let t = board::get_task(&db, 1).unwrap();
+        assert_eq!((t.points, t.tags.len(), t.sprint_id), (Some(5), 0, Some(1)));
+        keys(&mut s, &db, &["g", "b", "u", "g", ",", "u", "i", "return"]);
         let lines = screen(&mut s, &load_board(&db, now()).unwrap(), now());
         assert!(has(&lines, "5p") && has(&lines, "•bug") && has(&lines, "◆ Sprint 1 0/5 points"), "{}", lines.join("\n"));
         keys(&mut s, &db, &["S"]);
