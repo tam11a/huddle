@@ -65,9 +65,16 @@ The schema is the same as Charlie Lite's, so `SCRUM_DB` can also point at a Char
 
 ## The board in your terminal
 
-To see the board, or fix it by hand, run `huddle` with no arguments. It shows one column per status (done shows only today's), with overdue tasks in red and tasks due today in yellow. It uses the same file and rules as Claude, and refreshes every 2 seconds, so you can watch Claude change it.
+To see the board, or fix it by hand, run `huddle` with no arguments. It's a dashboard in the style of btop:
 
-Keys: arrows or `hjkl` to pick a task, `<` `>` to move it along backlog → todo → doing → review → done, `d` done, `b` block (asks for the reason; on a blocked task, unblocks it), `a` add, `e` edit the title, `t` set the due date, `p` raise the priority, `x` delete, `s` today's facts, `q` quit.
+- a header with today's counts and a progress bar for what you've finished today
+- one coloured column per status, with a card for each task: priority dot, due date (red when overdue, yellow when due today), project and blocker
+- the selected task's details, a chart of tasks done over the last 14 days, and open and done counts per project (when the terminal is at least 90×24)
+- a stand-up view (`s`) with Yesterday, Today and Blockers, and a help screen (`?`)
+
+It moves a little: a short intro, a flash on a card when it changes, notifications that slide in and fade, and a progress bar and chart that fill up. It only redraws while something is moving, so it uses almost no CPU when idle. It uses the same file and rules as Claude and refreshes every 2 seconds, so you can watch Claude change the board. It uses 24-bit colour; set `NO_COLOR=1` to turn colours off.
+
+Keys: arrows or `hjkl` to pick a task, `<` `>` to move it along backlog → todo → doing → review → done, `d` done, `b` block (asks for the reason; on a blocked task, unblocks it), `a` add, `e` edit the title, `t` set the due date, `p` raise the priority, `x` delete, `s` stand-up, `?` help, `q` quit.
 
 ## The commands
 

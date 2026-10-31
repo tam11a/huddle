@@ -463,6 +463,36 @@ pub fn add_note(db: &Connection, content: &str, kind: Option<&str>, task: Option
     })
 }
 
+// ---------- stats ----------
+
+/// Tasks finished on each of the last `days` days, oldest first.
+pub fn done_per_day(db: &Connection, days: usize, now: i64) -> Result<Vec<u64>> {
+    let starts = crate::time::last_days(days, now);
+    let mut out = vec![0; days];
+    for at in db.prepare("SELECT done_at FROM tasks WHERE deleted_at IS NULL AND done_at >= ?1")?.query_map([starts[0]], |r| r.get::<_, i64>(0))? {
+        let at = at?;
+        if let Some(i) = starts.iter().rposition(|s| at >= *s) {
+            out[i] += 1;
+        }
+    }
+    Ok(out)
+}
+
+pub struct ProjectStat {
+    pub slug: String,
+    pub open: i64,
+    pub done: i64,
+}
+
+/// Open tasks, and tasks done since `since`, per registered project.
+pub fn project_stats(db: &Connection, since: i64) -> Result<Vec<ProjectStat>> {
+    let mut q = db.prepare(
+        "SELECT p.slug, COALESCE(SUM(t.status != 'done'), 0), COALESCE(SUM(t.done_at >= ?1), 0)
+         FROM projects p LEFT JOIN tasks t ON t.project_id = p.id AND t.deleted_at IS NULL GROUP BY p.id ORDER BY p.slug")?;
+    let rows = q.query_map([since], |r| Ok(ProjectStat { slug: r.get(0)?, open: r.get(1)?, done: r.get(2)? }))?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
 // ---------- facts ----------
 
 pub struct Commit {
@@ -622,6 +652,24 @@ mod tests {
         let f = Filter { status: Some("all"), done_since: Some(at("2026-10-28T00:00")), ..Default::default() };
         let titles: Vec<String> = list_tasks(&db, &f, at("2026-10-28T12:00")).unwrap().into_iter().map(|t| t.title).collect();
         assert_eq!(titles, ["Open", "Fresh win"]);
+    }
+
+    #[test]
+    fn stats_count_done_per_day_and_per_project() {
+        let db = db();
+        add_project(&db, "web", "/tmp/web").unwrap();
+        add_project(&db, "api", "/tmp/api").unwrap();
+        let mon = at("2026-10-26T10:00");
+        let wed = at("2026-10-28T10:00");
+        add_task(&db, &NewTask { title: "A", status: Some("done"), project: Some("web"), ..Default::default() }, mon).unwrap();
+        add_task(&db, &NewTask { title: "B", status: Some("done"), project: Some("web"), ..Default::default() }, wed).unwrap();
+        add_task(&db, &NewTask { title: "C", project: Some("web"), ..Default::default() }, wed).unwrap();
+        add(&db, "D", Some("done"), None, wed);
+        add(&db, "Too old", Some("done"), None, at("2026-10-01T10:00"));
+
+        assert_eq!(done_per_day(&db, 3, wed).unwrap(), [1, 0, 2]); // Mon, Tue, Wed
+        let p = project_stats(&db, at("2026-10-27T00:00")).unwrap();
+        assert_eq!(p.iter().map(|p| (p.slug.as_str(), p.open, p.done)).collect::<Vec<_>>(), [("api", 0, 0), ("web", 1, 1)]);
     }
 
     #[test]

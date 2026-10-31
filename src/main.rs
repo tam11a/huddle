@@ -3,6 +3,7 @@ mod board;
 mod cli;
 mod time;
 mod tui;
+mod ui;
 
 use std::io::IsTerminal;
 use std::process::ExitCode;

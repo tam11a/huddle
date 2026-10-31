@@ -35,6 +35,24 @@ pub fn fmt_day(ms: i64) -> String {
     local(ms).format("%a %-d %b").to_string()
 }
 
+pub fn fmt_hm(ms: i64) -> String {
+    local(ms).format("%H:%M").to_string()
+}
+
+pub fn hour(ms: i64) -> u32 {
+    chrono::Timelike::hour(&local(ms))
+}
+
+/// The local midnights of the last `n` days, oldest first, today last.
+pub fn last_days(n: usize, now: i64) -> Vec<i64> {
+    let mut days = vec![start_of_day(now)];
+    while days.len() < n {
+        days.push(start_of_day(days[days.len() - 1] - 1));
+    }
+    days.reverse();
+    days
+}
+
 pub fn iso(ms: i64) -> String {
     DateTime::from_timestamp_millis(ms).unwrap_or_default().to_rfc3339_opts(SecondsFormat::Millis, true)
 }
