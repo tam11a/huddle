@@ -1,0 +1,12 @@
+{
+  "name": "huddle",
+  "description": "Huddle: your scrum board and stand-ups in Claude Code",
+  "owner": { "name": "tam11a" },
+  "plugins": [
+    {
+      "name": "huddle",
+      "source": "./",
+      "description": "A personal scrum board and stand-up assistant: tasks, blockers, stand-ups, daily plans, end-of-day and weekly reviews"
+    }
+  ]
+}

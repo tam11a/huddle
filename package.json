@@ -1,0 +1,14 @@
+{
+  "name": "huddle",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "A personal scrum board and stand-up skill for Claude Code",
+  "license": "MIT",
+  "scripts": {
+    "test": "node --test test/"
+  },
+  "engines": {
+    "node": ">=22.13"
+  }
+}
