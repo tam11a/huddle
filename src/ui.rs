@@ -2,7 +2,7 @@
 // Colours are truecolor (Catppuccin Mocha); NO_COLOR turns them off.
 use crate::board::{STATUSES, Task, fmt_id};
 use crate::time::{fmt_day, fmt_hm, fmt_when, hour, last_days, next_day, start_of_day};
-use crate::tui::{Board, PRIORITY, Prompt, State, pick};
+use crate::tui::{Action, Board, PRIORITY, Prompt, State, listed, selected, shown};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -106,7 +106,7 @@ pub fn next_frame(s: &State, t: Instant) -> Duration {
         || s.grow < 1.0
         || s.report.as_ref().is_some_and(|(_, at)| progress(t, *at, REPORT) < 1.0)
         || s.prompt.as_ref().is_some_and(|p| progress(t, p.opened, POP) < 1.0);
-    if moving { FRAME } else if s.prompt.is_some() { Duration::from_millis(530) } else { Duration::from_secs(60) }
+    if moving { FRAME } else if s.prompt.is_some() { Duration::from_millis(530) } else if s.focus.is_some() { Duration::from_secs(1) } else { Duration::from_secs(60) }
 }
 
 pub fn draw(f: &mut Frame, s: &mut State, b: &Board, v: &View) {
@@ -125,9 +125,14 @@ pub fn draw(f: &mut Frame, s: &mut State, b: &Board, v: &View) {
     let roomy = area.height >= 24 && area.width >= 90;
     let [head, body, info, foot] =
         Layout::vertical([Constraint::Length(3), Constraint::Fill(1), Constraint::Length(if roomy { 9 } else { 0 }), Constraint::Length(1)]).areas(area);
-    let sel = pick(s, &b.cols).cloned();
+    let cols = shown(b, s);
+    let sel = selected(s, &cols);
     header(f, head, s, b, v);
-    columns(f, body, s, b, v, sel.as_ref().map(|t| t.id));
+    if s.list {
+        list_view(f, body, s, &cols, v, sel.as_ref().map(|t| t.id));
+    } else {
+        columns(f, body, s, &cols, v, sel.as_ref().map(|t| t.id));
+    }
     if roomy {
         let [detail, chart, projects] = Layout::horizontal([Constraint::Fill(3), Constraint::Fill(3), Constraint::Fill(2)]).areas(info);
         task_panel(f, detail, sel.as_ref(), v.now);
@@ -161,6 +166,21 @@ fn header(f: &mut Frame, area: Rect, s: &State, b: &Board, v: &View) {
     let block = Block::bordered().border_type(BorderType::Rounded).border_style(fg(SUBTLE))
         .title_top(Line::from([vec![Span::raw(" ")], gradient("◆ huddle", PINK, BLUE), vec![Span::raw(" ")]].concat()))
         .title_top(Line::from(vec![Span::styled(format!(" {live} live "), fg(GREEN)), Span::styled(format!("· {} ", fmt_when(v.now)), fg(DIM))]).right_aligned());
+    let mut filters = vec![];
+    let typing = s.prompt.as_ref().filter(|p| matches!(p.action, Action::Search)).map(|p| p.value.as_str());
+    if let Some(text) = typing.or((!s.filter.is_empty()).then_some(s.filter.as_str())) {
+        filters.push(Span::styled(format!(" / {text} "), bold(PINK)));
+    }
+    if let Some(p) = &s.project {
+        filters.push(Span::styled(format!(" #{p} "), bold(TEAL)));
+    }
+    if s.list {
+        filters.push(Span::styled(" list view ", bold(BLUE)));
+    }
+    let block = if filters.is_empty() { block } else {
+        filters.push(Span::styled("esc clears ", fg(DIM)));
+        block.title_bottom(Line::from(filters).right_aligned())
+    };
     let inner = block.inner(area);
     f.render_widget(block, area);
 
@@ -176,16 +196,27 @@ fn header(f: &mut Frame, area: Rect, s: &State, b: &Board, v: &View) {
         Span::styled(format!("{done} done today"), fg(tone(done, GREEN))),
         Span::styled(if v.file.is_empty() { String::new() } else { format!("   {}", v.file) }, fg(SUBTLE)),
     ])), left);
-    f.render_widget(Gauge::default().ratio(s.gauge.clamp(0.0, 1.0)).use_unicode(true)
-        .label(format!("today {done}/{}", done + doing))
-        .gauge_style(Style::new().fg(c(GREEN)).bg(c(SURFACE))), right);
+    let gauge = match &s.focus {
+        Some(fo) => {
+            let gone = v.t.saturating_duration_since(fo.started).min(fo.length);
+            let left = (fo.length - gone).as_secs();
+            let ring = ["○", "◔", "◑", "◕", "●"][(progress(v.t, fo.started, fo.length) * 4.0) as usize];
+            Gauge::default().ratio(progress(v.t, fo.started, fo.length)).use_unicode(true)
+                .label(format!("{ring} {:02}:{:02} focus {}", left / 60, left % 60, fmt_id(fo.id)))
+                .gauge_style(Style::new().fg(c(PEACH)).bg(c(SURFACE)))
+        }
+        None => Gauge::default().ratio(s.gauge.clamp(0.0, 1.0)).use_unicode(true)
+            .label(format!("today {done}/{}", done + doing))
+            .gauge_style(Style::new().fg(c(GREEN)).bg(c(SURFACE))),
+    };
+    f.render_widget(gauge, right);
 }
 
-fn columns(f: &mut Frame, area: Rect, s: &State, b: &Board, v: &View, sel: Option<i64>) {
+fn columns(f: &mut Frame, area: Rect, s: &State, cols: &[Vec<Task>], v: &View, sel: Option<i64>) {
     let today = start_of_day(v.now);
     let tomorrow = next_day(today);
     let areas = Layout::horizontal([Constraint::Ratio(1, 6); 6]).split(area);
-    for (i, col) in b.cols.iter().enumerate() {
+    for (i, col) in cols.iter().enumerate() {
         let (on, color) = (i == s.col, COLUMN[i]);
         let mut block = Block::bordered().border_type(BorderType::Rounded)
             .border_style(if on { bold(color) } else { fg(SUBTLE) })
@@ -248,6 +279,44 @@ fn card(t: &Task, color: Rgb, selected: bool, flash: Option<(i64, Instant)>, now
         Some(bg) => p.style(Style::new().bg(c(bg))),
         None => p,
     }
+}
+
+/// Every shown task as one list, most urgent first.
+fn list_view(f: &mut Frame, area: Rect, s: &State, cols: &[Vec<Task>], v: &View, sel: Option<i64>) {
+    let today = start_of_day(v.now);
+    let tomorrow = next_day(today);
+    let all = listed(cols);
+    let block = Block::bordered().border_type(BorderType::Rounded).border_style(bold(BLUE))
+        .title_top(Line::from(vec![Span::styled(" ≡ all tasks ", bold(BLUE)), Span::styled(format!("{} ", all.len()), fg(DIM))]));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    let fits = inner.height.saturating_sub(1) as usize;
+    let top = (s.list_row.max(0) as usize + 1).saturating_sub(fits);
+    let title_w = (inner.width as usize).saturating_sub(48);
+    let mut lines = vec![Line::styled(format!("   {:<9}  {:<6} {:<w$}  {:<12} {}", "status", "id", "title", "project", "due", w = title_w), fg(DIM))];
+    for t in all.iter().skip(top).take(fits) {
+        let on = sel == Some(t.id);
+        let i = STATUSES.iter().position(|x| *x == t.status).unwrap_or(0);
+        let due = t.due_at.map(|d| {
+            let tone = if t.status == "done" { DIM } else if d < today { RED } else if d < tomorrow { YELLOW } else { DIM };
+            Span::styled(fmt_when(d), fg(tone))
+        });
+        let mut spans = vec![
+            Span::styled(if on { "▌" } else { " " }, fg(COLUMN[i])),
+            Span::styled("● ", fg(if t.status == "done" { GREEN } else { PRIO[t.priority as usize] })),
+            Span::styled(format!("{:<9}  ", t.status), fg(COLUMN[i])),
+            Span::styled(format!("{:<6} ", fmt_id(t.id)), fg(DIM)),
+            Span::styled(format!("{:<w$}  ", clip(&t.title, title_w), w = title_w), if on { bold(TEXT) } else { fg(TEXT) }),
+            Span::styled(format!("{:<12} ", clip(t.project.as_deref().unwrap_or(""), 12)), fg(TEAL)),
+        ];
+        spans.extend(due);
+        let line = Line::from(spans);
+        lines.push(if on && !no_color() { line.style(Style::new().bg(c(SURFACE))) } else { line });
+    }
+    if all.is_empty() {
+        lines.push(Line::styled("   nothing matches · esc clears the filters", fg(DIM)));
+    }
+    f.render_widget(Paragraph::new(lines), inner);
 }
 
 fn task_panel(f: &mut Frame, area: Rect, t: Option<&Task>, now: i64) {
@@ -329,7 +398,7 @@ fn project_panel(f: &mut Frame, area: Rect, b: &Board) {
 }
 
 fn footer(f: &mut Frame, area: Rect, s: &State, t: Instant) {
-    let keys = [("←→↑↓", "pick"), ("< >", "move"), ("d", "done"), ("b", "block"), ("a", "add"), ("e", "edit"), ("t", "due"), ("p", "prio"), ("x", "del"), ("s", "stand-up"), ("r", "report"), ("?", "help"), ("q", "quit")];
+    let keys = [("?", "help"), ("←→↑↓", "pick"), ("< >", "move"), ("d", "done"), ("b", "block"), ("a", "add"), ("/", "search"), ("tab", "list"), ("f", "focus"), ("u", "undo"), ("s", "stand-up"), ("r", "report"), ("q", "quit")];
     let hints: Vec<Span> = keys.iter().flat_map(|(k, d)| [Span::styled(format!(" {k}"), bold(PINK)), Span::styled(format!(" {d} "), fg(DIM))]).collect();
     let age = progress(t, s.toast, TOAST);
     let toast = if s.msg.is_empty() || age >= 1.0 { String::new() } else { format!(" {} {} ", if s.err { "✖" } else { "✔" }, s.msg) };
@@ -358,7 +427,11 @@ fn overlay(f: &mut Frame, area: Rect, title: &str, hint: &str, color: Rgb) -> (R
 fn prompt(f: &mut Frame, area: Rect, p: &Prompt, t: Instant) {
     let ease = 1.0 - (1.0 - progress(t, p.opened, POP)).powi(3); // pops open from 60% width
     let r = centered(area, (64.0 * (0.6 + 0.4 * ease)) as u16, 6);
-    let (color, hint) = if p.confirm { (RED, "y delete · any other key keeps it") } else { (PINK, "enter save · esc cancel") };
+    let (color, hint) = match p.action {
+        _ if p.confirm => (RED, "y delete · any other key keeps it"),
+        Action::Search => (PINK, "type to filter · enter keeps it · esc clears"),
+        _ => (PINK, "enter save · esc cancel"),
+    };
     let (r, block) = overlay(f, r, &p.label, hint, color);
     let lines = if p.confirm {
         vec![Line::styled("It leaves the board; huddle update <id> --restore brings it back.", fg(TEXT))]
@@ -379,10 +452,17 @@ fn help(f: &mut Frame, area: Rect) {
         ("d", "mark it done"),
         ("b", "block it, or unblock it"),
         ("a", "add a task to this column"),
-        ("e", "edit the title"),
+        ("e  E", "edit the title, or the description"),
+        ("o", "set the project"),
         ("t", "set the due date"),
         ("p", "raise the priority"),
         ("x", "delete it"),
+        ("u", "undo the last change"),
+        ("f", "focus: 25 minutes on it, or stop"),
+        ("/", "search titles and descriptions"),
+        ("P", "show one project at a time"),
+        ("tab", "switch between columns and a list"),
+        ("esc", "clear search and project filter"),
         ("s", "stand-up for today"),
         ("r", "report: this week in numbers"),
         ("?", "this help"),
@@ -436,6 +516,10 @@ fn standup(f: &mut Frame, area: Rect, (y, t): &(Value, Value)) {
     f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }).block(block), r);
 }
 
+fn plural(n: i64, word: &str) -> String {
+    format!("{n} {word}{}", if n == 1 { "" } else { "s" })
+}
+
 fn hours_text(h: Option<f64>) -> String {
     match h {
         None => "–".into(),
@@ -467,8 +551,8 @@ fn report(f: &mut Frame, area: Rect, b: &Board, r: &Value, at: Instant, v: &View
     let blocked = &r["blocked_hours"];
     tile(f, cells[0], "done", up(&t["done"]).to_string(), format!("{} added", n(&t["added"])), GREEN);
     tile(f, cells[1], "streak", format!("{} days", up(&r["streak_days"])), "workdays in a row".into(), PEACH);
-    tile(f, cells[2], "cycle time", hours_text(cycle["median"].as_f64()), format!("median of {} tasks", n(&cycle["tasks"])), BLUE);
-    tile(f, cells[3], "blocked", hours_text(blocked["total"].as_f64().filter(|h| *h > 0.0)), format!("{} tasks", n(&blocked["tasks"])), RED);
+    tile(f, cells[2], "cycle time", hours_text(cycle["median"].as_f64()), format!("median of {}", plural(n(&cycle["tasks"]), "task")), BLUE);
+    tile(f, cells[3], "blocked", hours_text(blocked["total"].as_f64().filter(|h| *h > 0.0)), plural(n(&blocked["tasks"]), "task"), RED);
     tile(f, cells[4], "open", up(&t["open"]).to_string(), format!("{} doing · {} overdue", n(&t["doing"]), n(&t["overdue"])), YELLOW);
 
     let [chart, projects] = Layout::horizontal([Constraint::Fill(3), Constraint::Fill(2)]).areas(mid);

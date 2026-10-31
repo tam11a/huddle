@@ -30,20 +30,38 @@ pub fn load_board(db: &Connection, now: i64) -> Result<Board> {
     })
 }
 
-enum Action {
+pub enum Action {
     Add,
+    Search,
     Block(i64),
     Title(i64),
+    Description(i64),
+    Project(i64),
     Due(i64),
     Delete(i64),
 }
+
+/// One step back: the task as it was before the last change, or the task the last add created.
+enum Undo {
+    Changed(Task),
+    Added(i64),
+}
+
+pub struct Focus {
+    pub id: i64,
+    pub title: String,
+    pub started: Instant,
+    pub length: Duration,
+}
+
+const FOCUS: Duration = Duration::from_secs(25 * 60);
 
 pub struct Prompt {
     pub label: String,
     pub value: String,
     pub confirm: bool,
     pub opened: Instant,
-    action: Action,
+    pub action: Action,
 }
 
 pub struct State {
@@ -56,6 +74,13 @@ pub struct State {
     pub msg: String,
     pub err: bool,
     pub quit: bool,
+    // what's shown: a text filter, a project filter, and the list view instead of columns
+    pub filter: String,
+    pub project: Option<String>,
+    pub list: bool,
+    pub list_row: i64,
+    pub focus: Option<Focus>,
+    undo: Option<Undo>,
     // motion: when things happened, and the eased values the drawing chases
     pub started: Instant,
     pub intro: Option<Instant>,
@@ -79,6 +104,12 @@ impl State {
             msg: String::new(),
             err: false,
             quit: false,
+            filter: String::new(),
+            project: None,
+            list: false,
+            list_row: 0,
+            focus: None,
+            undo: None,
             started: t,
             intro: None,
             toast: t,
@@ -98,11 +129,78 @@ pub fn pick<'b>(s: &mut State, cols: &'b [Vec<Task>]) -> Option<&'b Task> {
     cols[s.col].get(s.rows[s.col] as usize)
 }
 
+/// The board's columns after the text and project filters; while searching, the text being typed filters live.
+pub fn shown(b: &Board, s: &State) -> Vec<Vec<Task>> {
+    let text = match &s.prompt {
+        Some(p) if matches!(p.action, Action::Search) => p.value.to_lowercase(),
+        _ => s.filter.to_lowercase(),
+    };
+    let keep = |t: &Task| {
+        s.project.as_ref().is_none_or(|p| t.project.as_ref() == Some(p))
+            && (text.is_empty() || fmt_id(t.id) == text || t.title.to_lowercase().contains(&text) || t.description.to_lowercase().contains(&text))
+    };
+    b.cols.iter().map(|c| c.iter().filter(|t| keep(t)).cloned().collect()).collect()
+}
+
+/// Every shown task in one list, most urgent first: doing, blocked, review, todo, backlog, done.
+pub fn listed(cols: &[Vec<Task>]) -> Vec<Task> {
+    [2, 4, 3, 1, 0, 5].iter().flat_map(|&i| cols[i].iter().cloned()).collect()
+}
+
+/// The selected task, in whichever view is showing.
+pub fn selected(s: &mut State, cols: &[Vec<Task>]) -> Option<Task> {
+    if s.list {
+        let l = listed(cols);
+        s.list_row = s.list_row.min(l.len() as i64 - 1).max(0);
+        l.get(s.list_row as usize).cloned()
+    } else {
+        pick(s, cols).cloned()
+    }
+}
+
 fn follow(s: &mut State, db: &Connection, id: i64, now: i64) -> Result<()> {
-    for (c, col) in load_board(db, now)?.cols.iter().enumerate() {
+    let cols = shown(&load_board(db, now)?, s);
+    for (c, col) in cols.iter().enumerate() {
         if let Some(r) = col.iter().position(|t| t.id == id) {
             s.col = c;
             s.rows[c] = r as i64;
+        }
+    }
+    if let Some(r) = listed(&cols).iter().position(|t| t.id == id) {
+        s.list_row = r as i64;
+    }
+    Ok(())
+}
+
+/// Ends the focus session when its time is up.
+pub fn tick(s: &mut State, t: Instant) {
+    if let Some(f) = s.focus.take_if(|f| t.saturating_duration_since(f.started) >= f.length) {
+        s.msg = format!("focus done: {} min on {} {}", f.length.as_secs() / 60, fmt_id(f.id), f.title);
+        s.err = false;
+        s.toast = t;
+        s.flash = Some((f.id, t));
+    }
+}
+
+fn undo(s: &mut State, db: &Connection, now: i64) -> Result<()> {
+    match s.undo.take() {
+        None => s.msg = "nothing to undo".into(),
+        Some(Undo::Added(id)) => {
+            let t = board::update_task(db, &id.to_string(), &Patch { delete: true, ..Default::default() }, now)?;
+            s.msg = format!("{} {}: add undone", fmt_id(t.id), t.title);
+        }
+        Some(Undo::Changed(p)) => {
+            let cur = board::get_task(db, p.id)?;
+            let (priority, project) = (p.priority.to_string(), p.project.clone().unwrap_or_default());
+            let due = p.due_at.map_or("none".into(), crate::time::fmt_local_iso);
+            let t = board::update_task(db, &p.id.to_string(), &Patch {
+                status: Some(&p.status), blocked_reason: p.blocked_reason.as_deref(), title: Some(&p.title), description: Some(&p.description),
+                priority: Some(&priority), due: Some(&due), project: Some(&project), restore: cur.deleted_at.is_some() && p.deleted_at.is_none(),
+                delete: false,
+            }, now)?;
+            follow(s, db, t.id, now)?;
+            s.msg = format!("{} {}: undone", fmt_id(t.id), t.title);
+            s.flash = Some((t.id, Instant::now()));
         }
     }
     Ok(())
@@ -113,7 +211,9 @@ fn ask(s: &mut State, label: &str, value: &str, action: Action) {
 }
 
 fn change(s: &mut State, db: &Connection, id: i64, p: &Patch, what: &str, go: bool, now: i64) -> Result<()> {
+    let before = board::get_task(db, id)?;
     let t = board::update_task(db, &id.to_string(), p, now)?;
+    s.undo = Some(Undo::Changed(before));
     if go {
         follow(s, db, t.id, now)?;
     }
@@ -159,7 +259,12 @@ fn type_into(s: &mut State, k: &str, db: &Connection, now: i64) -> Result<()> {
                 submit(s, p.action, "", db, now)?;
             }
         }
-        "escape" => s.prompt = None,
+        "escape" => {
+            if matches!(p.action, Action::Search) {
+                s.filter.clear();
+            }
+            s.prompt = None;
+        }
         "return" => {
             let p = s.prompt.take().unwrap();
             submit(s, p.action, p.value.trim(), db, now)?;
@@ -182,8 +287,15 @@ fn submit(s: &mut State, a: Action, v: &str, db: &Connection, now: i64) -> Resul
             follow(s, db, t.id, now)?;
             s.msg = format!("{} {}: added", fmt_id(t.id), t.title);
             s.flash = Some((t.id, Instant::now()));
+            s.undo = Some(Undo::Added(t.id));
             Ok(())
         }
+        Action::Search => {
+            s.filter = v.to_string();
+            Ok(())
+        }
+        Action::Description(id) => change(s, db, id, &Patch { description: Some(v), ..Default::default() }, "description saved", false, now),
+        Action::Project(id) => change(s, db, id, &Patch { project: Some(v), ..Default::default() }, if v.is_empty() { "project cleared" } else { "project set" }, false, now),
         Action::Block(id) => change(s, db, id, &Patch { status: Some("blocked"), blocked_reason: Some(v), ..Default::default() }, "→ blocked", false, now),
         Action::Title(id) => change(s, db, id, &Patch { title: Some(v), ..Default::default() }, "renamed", false, now),
         Action::Due(_) if v.is_empty() => Ok(()),
@@ -194,17 +306,44 @@ fn submit(s: &mut State, a: Action, v: &str, db: &Connection, now: i64) -> Resul
 
 fn board_key(s: &mut State, k: &str, db: &Connection, now: i64) -> Result<()> {
     let b = load_board(db, now)?;
-    let t = pick(s, &b.cols).cloned();
+    let cols = shown(&b, s);
+    let t = selected(s, &cols);
     match k {
-        "left" | "h" => s.col = s.col.saturating_sub(1),
-        "right" | "l" => s.col = (s.col + 1).min(STATUSES.len() - 1),
+        "left" | "h" if !s.list => s.col = s.col.saturating_sub(1),
+        "right" | "l" if !s.list => s.col = (s.col + 1).min(STATUSES.len() - 1),
+        "up" | "k" if s.list => s.list_row -= 1,
+        "down" | "j" if s.list => s.list_row += 1,
         "up" | "k" => s.rows[s.col] -= 1,
         "down" | "j" => s.rows[s.col] += 1,
+        "tab" => s.list = !s.list,
         "q" => s.quit = true,
         "?" => s.help = true,
         "s" => s.standup = Some((board::facts(db, "last_workday", now)?, board::facts(db, "today", now)?)),
         "r" => s.report = Some((board::report(db, "week", now)?, Instant::now())),
         "a" => ask(s, "New task", "", Action::Add),
+        "u" => undo(s, db, now)?,
+        "/" => {
+            let current = s.filter.clone();
+            ask(s, "Search", &current, Action::Search);
+        }
+        "P" => {
+            let slugs: Vec<&String> = b.projects.iter().map(|p| &p.slug).collect();
+            let next = match &s.project {
+                None => slugs.first().copied(),
+                Some(p) => slugs.iter().skip_while(|x| **x != p).nth(1).copied(),
+            };
+            s.project = next.cloned();
+            s.msg = match &s.project { Some(p) => format!("showing project {p}"), None => "showing all projects".into() };
+        }
+        "escape" if !s.filter.is_empty() || s.project.is_some() => {
+            s.filter.clear();
+            s.project = None;
+            s.msg = "filters cleared".into();
+        }
+        "f" if s.focus.is_some() => {
+            let f = s.focus.take().unwrap();
+            s.msg = format!("focus stopped after {} min on {}", f.started.elapsed().as_secs() / 60, fmt_id(f.id));
+        }
         _ => {
             let Some(t) = t else { return Ok(()) }; // the rest act on the selected task
             let i = FLOW.iter().position(|f| *f == if t.status == "blocked" { "doing" } else { &t.status }).unwrap_or(0);
@@ -216,6 +355,19 @@ fn board_key(s: &mut State, k: &str, db: &Connection, now: i64) -> Result<()> {
                 "b" if t.status == "blocked" => change(s, db, t.id, &to("doing"), "unblocked", false, now)?,
                 "b" => ask(s, "Blocked on", "", Action::Block(t.id)),
                 "e" => ask(s, "Title", &t.title, Action::Title(t.id)),
+                "E" => ask(s, "Description", &t.description, Action::Description(t.id)),
+                "o" => {
+                    let known: Vec<&str> = b.projects.iter().map(|p| p.slug.as_str()).collect();
+                    let label = format!("Project ({}; empty clears)", if known.is_empty() { "none registered".into() } else { known.join(", ") });
+                    ask(s, &label, t.project.as_deref().unwrap_or(""), Action::Project(t.id));
+                }
+                "f" => {
+                    if t.status == "backlog" || t.status == "todo" {
+                        change(s, db, t.id, &to("doing"), "→ doing", false, now)?;
+                    }
+                    s.focus = Some(Focus { id: t.id, title: t.title.clone(), started: Instant::now(), length: FOCUS });
+                    s.msg = format!("focus: {} min on {} {}", FOCUS.as_secs() / 60, fmt_id(t.id), t.title);
+                }
                 "t" => ask(s, "Due (fri, tomorrow 9:30, none)", "", Action::Due(t.id)),
                 "p" => {
                     let p = (t.priority + 3) % 4;
@@ -242,6 +394,7 @@ fn key_name(e: &KeyEvent) -> String {
         KeyCode::Enter => "return".into(),
         KeyCode::Esc => "escape".into(),
         KeyCode::Backspace => "backspace".into(),
+        KeyCode::Tab => "tab".into(),
         _ => String::new(),
     }
 }
@@ -266,6 +419,7 @@ fn run(term: &mut ratatui::DefaultTerminal, db: &Connection, s: &mut State, file
             loaded = Instant::now();
         }
         let t = Instant::now();
+        tick(s, t);
         term.draw(|f| ui::draw(f, s, &b, &ui::View { now: now(), t, file }))?;
         // ~30 fps while something moves, otherwise sleep until the next refresh or key
         if !event::poll(ui::next_frame(s, t).min(REFRESH.saturating_sub(loaded.elapsed())))? {
@@ -334,6 +488,52 @@ mod tests {
         }
         assert!(has(&lines, "#3 Late thing"));
         assert!(!has(&lines, "Old win"));
+    }
+
+    #[test]
+    fn search_project_filter_list_view_undo_and_focus() {
+        let db = board::open_db(":memory:").unwrap();
+        board::add_project(&db, "web", "/tmp/web").unwrap();
+        board::add_project(&db, "api", "/tmp/api").unwrap();
+        let add = |title, status, project| board::add_task(&db, &NewTask { title, status: Some(status), project, ..Default::default() }, now()).unwrap();
+        add("Write docs", "todo", Some("web"));
+        add("Fix login", "doing", Some("api"));
+        add("Deploy", "doing", None);
+        let mut s = State::new();
+        let count = |s: &State| shown(&load_board(&db, now()).unwrap(), s).iter().flatten().count();
+        let status = |id| board::get_task(&db, id).unwrap();
+
+        keys(&mut s, &db, &["/"]);
+        keys(&mut s, &db, &typed("login").iter().map(String::as_str).collect::<Vec<_>>());
+        assert_eq!(count(&s), 1); // filters while typing
+        keys(&mut s, &db, &["return"]);
+        assert_eq!((s.filter.as_str(), count(&s)), ("login", 1));
+        keys(&mut s, &db, &["escape"]);
+        assert_eq!(count(&s), 3);
+
+        keys(&mut s, &db, &["P"]);
+        assert_eq!((s.project.as_deref(), count(&s)), (Some("api"), 1));
+        keys(&mut s, &db, &["P", "P"]);
+        assert_eq!(s.project, None);
+
+        keys(&mut s, &db, &["tab", "down", "d"]); // list: Fix login, Deploy, Write docs
+        assert_eq!(status(3).status, "done");
+        keys(&mut s, &db, &["u"]);
+        assert_eq!(status(3).status, "doing");
+        keys(&mut s, &db, &["x", "y"]);
+        assert!(status(3).deleted_at.is_some());
+        keys(&mut s, &db, &["u"]);
+        assert!(status(3).deleted_at.is_none());
+        keys(&mut s, &db, &["tab", "a", "T", "return", "u"]);
+        assert!(status(4).deleted_at.is_some()); // undoing an add deletes it again
+        assert_eq!(s.msg, "#4 T: add undone");
+
+        keys(&mut s, &db, &["left", "f"]); // focus on Write docs, in todo: it moves to doing
+        assert_eq!(status(1).status, "doing");
+        assert!(has(&screen(&mut s, &load_board(&db, now()).unwrap(), now()), "focus #1"));
+        s.focus.as_mut().unwrap().started -= Duration::from_secs(26 * 60);
+        tick(&mut s, Instant::now());
+        assert!(s.focus.is_none() && s.msg.starts_with("focus done: 25 min on #1"));
     }
 
     #[test]

@@ -88,7 +88,7 @@ To see the board, or fix it by hand, run `huddle` with no arguments. It's a dash
 
 It moves a little: a short intro, a flash on a card when it changes, notifications that slide in and fade, and a progress bar and chart that fill up. It only redraws while something is moving, so it uses almost no CPU when idle. It uses the same file and rules as Claude and refreshes every 2 seconds, so you can watch Claude change the board. It uses 24-bit colour; set `NO_COLOR=1` to turn colours off.
 
-Keys: arrows or `hjkl` to pick a task, `<` `>` to move it along backlog → todo → doing → review → done, `d` done, `b` block (asks for the reason; on a blocked task, unblocks it), `a` add, `e` edit the title, `t` set the due date, `p` raise the priority, `x` delete, `s` stand-up, `?` help, `q` quit.
+Keys: arrows or `hjkl` to pick a task, `<` `>` to move it along backlog → todo → doing → review → done, `d` done, `b` block (asks for the reason; on a blocked task, unblocks it), `a` add, `e` edit the title, `E` the description, `o` the project, `t` set the due date, `p` raise the priority, `x` delete, `u` undo the last change, `/` search (filters as you type), `P` show one project at a time, `tab` switch between columns and a list, `esc` clear the filters, `f` focus: a 25-minute countdown on the selected task (it moves to doing; `f` again stops it), `s` stand-up, `r` report, `?` help, `q` quit.
 
 ## The commands
 

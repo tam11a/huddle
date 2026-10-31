@@ -270,6 +270,11 @@ fn tasks(db: &Connection, sql: &str, args: Vec<Sql>) -> Result<Vec<Task>> {
     Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
+/// One task by id, deleted ones included.
+pub fn get_task(db: &Connection, id: i64) -> Result<Task> {
+    get_row(db, id)
+}
+
 fn get_row(db: &Connection, id: i64) -> Result<Task> {
     tasks(db, &format!("{TASK_SELECT} WHERE t.id = ?"), vec![Sql::Integer(id)])?.pop()
         .ok_or_else(|| Error(format!("no task {}", fmt_id(id))))

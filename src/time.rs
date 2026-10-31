@@ -35,6 +35,11 @@ pub fn fmt_day(ms: i64) -> String {
     local(ms).format("%a %-d %b").to_string()
 }
 
+/// Local wall-clock time that parse_when reads back exactly: "2026-10-31T09:30:00".
+pub fn fmt_local_iso(ms: i64) -> String {
+    local(ms).format("%Y-%m-%dT%H:%M:%S").to_string()
+}
+
 pub fn fmt_hm(ms: i64) -> String {
     local(ms).format("%H:%M").to_string()
 }
