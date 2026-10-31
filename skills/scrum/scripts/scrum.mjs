@@ -250,7 +250,7 @@ export function updateTask(db, ref, patch, now = Date.now()) {
   });
 }
 
-/** status: a status name, "open" (default: everything not done), or "all". Deleted tasks never show. */
+/** status: a status name, "open" (default: everything not done), or "all". done_since hides tasks done before that time. Deleted tasks never show. */
 export function listTasks(db, f = {}, now = Date.now()) {
   const where = ['t.deleted_at IS NULL'];
   const args = [];
@@ -262,6 +262,7 @@ export function listTasks(db, f = {}, now = Date.now()) {
   // shortcut: LIKE scan, move to FTS5 if tasks pass ~5k rows
   else if (f.query) { where.push('(t.title LIKE ? OR t.description LIKE ?)'); args.push(`%${f.query}%`, `%${f.query}%`); }
   if (f.due_before) { where.push('t.due_at IS NOT NULL AND t.due_at < ?'); args.push(parseWhen(f.due_before, new Date(now))); }
+  if (f.done_since) { where.push('(t.done_at IS NULL OR t.done_at >= ?)'); args.push(f.done_since); }
   return db.prepare(
     `${TASK_SELECT} WHERE ${where.join(' AND ')}
      ORDER BY CASE t.status WHEN 'doing' THEN 0 WHEN 'blocked' THEN 1 WHEN 'review' THEN 2 WHEN 'todo' THEN 3 WHEN 'backlog' THEN 4 ELSE 5 END,

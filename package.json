@@ -5,6 +5,9 @@
   "type": "module",
   "description": "A personal scrum board and stand-up skill for Claude Code",
   "license": "MIT",
+  "bin": {
+    "huddle": "skills/scrum/scripts/tui.mjs"
+  },
   "scripts": {
     "test": "node --test test/"
   },

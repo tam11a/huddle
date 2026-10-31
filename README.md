@@ -57,6 +57,19 @@ Set `SCRUM_DB` to use another file, for example one board per job. To set it for
 
 The schema is the same as Charlie Lite's, so `SCRUM_DB` can also point at a Charlie database and share its board.
 
+## The board in your terminal
+
+To see the board, or fix it by hand, install the `huddle` command once and run it:
+
+```bash
+npm i -g github:tam11a/huddle
+huddle
+```
+
+It shows one column per status (done shows only today's), with overdue tasks in red and tasks due today in yellow. It uses the same file and rules as Claude, and refreshes every 2 seconds, so you can watch Claude change it.
+
+Keys: arrows or `hjkl` to pick a task, `<` `>` to move it along backlog → todo → doing → review → done, `d` done, `b` block (asks for the reason; on a blocked task, unblocks it), `a` add, `e` edit the title, `t` set the due date, `p` raise the priority, `x` delete, `s` today's facts, `q` quit.
+
 ## The script
 
 Claude drives `skills/scrum/scripts/scrum.mjs`, and you can run it yourself too:
