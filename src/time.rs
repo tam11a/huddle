@@ -39,6 +39,10 @@ pub fn fmt_hm(ms: i64) -> String {
     local(ms).format("%H:%M").to_string()
 }
 
+pub fn is_weekend(ms: i64) -> bool {
+    local(ms).weekday().num_days_from_monday() >= 5
+}
+
 pub fn hour(ms: i64) -> u32 {
     chrono::Timelike::hour(&local(ms))
 }

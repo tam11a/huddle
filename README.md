@@ -21,6 +21,7 @@ Tell Claude what you're working on, and it keeps the board for you. Each morning
 - **Plan today:** proposes up to 5 tasks (overdue and due first), and moves them to doing only after you say OK.
 - **End of day:** an 8-line summary saved as a report; the next stand-up reads it.
 - **Weekly review:** what got done, what slipped, and the top 5 for next week.
+- **Reports with charts:** "daily report" or "how did my week go" gets you tasks done per day, your workday streak, cycle time (doing → done), hours blocked, per-project counts, what's sitting still and what carries over. In the Claude app it's a page with real charts; in the terminal, press `r` on the board.
 - **Plan from a document:** turns a spec or brief into proposed tasks, and creates them only after you say yes.
 - **Git-aware:** register a repo once (`huddle project add <slug>`), and your commits there show up in stand-ups. It also adds a post-commit hook: a commit that names `#12` starts that task, and `fixes #12` finishes it. Only tasks of that repo's project move, so GitHub issue numbers elsewhere are safe.
 - **Keeps Claude up to date:** when a Claude Code session starts, Claude sees what's in doing, blocked, in review and overdue, and whether the folder is a huddle project.

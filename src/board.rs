@@ -493,6 +493,108 @@ pub fn project_stats(db: &Connection, since: i64) -> Result<Vec<ProjectStat>> {
     Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
+/// Workdays in a row, back from today, with at least one task done. A quiet weekend or a quiet today doesn't break it.
+fn streak(per_day: &[u64], days: &[i64]) -> u64 {
+    let mut n = 0;
+    for (i, (&d, &day)) in per_day.iter().zip(days).enumerate().rev() {
+        match d {
+            0 if i == per_day.len() - 1 || crate::time::is_weekend(day) => {}
+            0 => break,
+            _ => n += 1,
+        }
+    }
+    n
+}
+
+fn median(mut xs: Vec<f64>) -> Option<f64> {
+    xs.sort_by(f64::total_cmp);
+    let n = xs.len();
+    (n > 0).then(|| if n % 2 == 1 { xs[n / 2] } else { (xs[n / 2 - 1] + xs[n / 2]) / 2.0 })
+}
+
+/// The numbers behind a daily or weekly report: throughput, streak, cycle time, time blocked, what's sitting still and what carries over.
+pub fn report(db: &Connection, period: &str, now: i64) -> Result<Value> {
+    let today = start_of_day(now);
+    let from = match period {
+        "today" => today,
+        "week" => start_of_day(today - 6 * DAY),
+        _ => return err("period must be today or week"),
+    };
+    let days = crate::time::last_days(14, now);
+    let per_day = done_per_day(db, 14, now)?;
+    let long = done_per_day(db, 60, now)?;
+    let open = list_tasks(db, &Filter::default(), now)?;
+    let hours = |ms: i64| ms as f64 / 3_600_000.0;
+    let round = |h: f64| (h * 10.0).round() / 10.0;
+
+    // cycle time: first move into doing (or creation) until done, for tasks finished in the window
+    let cycles: Vec<f64> = db.prepare(
+        "SELECT t.done_at - COALESCE((SELECT MIN(e.created_at) FROM events e WHERE e.task_id = t.id AND (
+             (e.type = 'task.status' AND json_extract(e.payload, '$.to') = 'doing') OR
+             (e.type = 'task.add' AND json_extract(e.payload, '$.status') = 'doing'))), t.created_at)
+         FROM tasks t WHERE t.deleted_at IS NULL AND t.done_at >= ?1 AND t.done_at < ?2")?
+        .query_map([from, now], |r| r.get::<_, i64>(0))?.map(|d| d.map(|d| hours(d.max(0)))).collect::<rusqlite::Result<_>>()?;
+
+    // time blocked inside the window, from the status events
+    let mut since = std::collections::HashMap::new();
+    let (mut blocked_ms, mut blocked_tasks) = (0, std::collections::HashSet::new());
+    let mut clip = |task: i64, a: i64, b: i64| {
+        let ms = b.min(now) - a.max(from);
+        if ms > 0 {
+            blocked_ms += ms;
+            blocked_tasks.insert(task);
+        }
+    };
+    let mut q = db.prepare("SELECT e.task_id, e.created_at, e.type, e.payload FROM events e JOIN tasks t ON t.id = e.task_id
+        WHERE t.deleted_at IS NULL AND e.type IN ('task.add', 'task.status') AND e.created_at < ?1 ORDER BY e.created_at, e.id")?;
+    for row in q.query_map([now], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, String>(2)?, r.get::<_, String>(3)?)))? {
+        let (task, at, kind, payload) = row?;
+        let p: Value = serde_json::from_str(&payload).unwrap_or_default();
+        let to = if kind == "task.add" { &p["status"] } else { &p["to"] };
+        if p["from"] == "blocked" {
+            if let Some(start) = since.remove(&task) {
+                clip(task, start, at);
+            }
+        }
+        if to == "blocked" {
+            since.insert(task, at);
+        }
+    }
+    for (task, start) in since {
+        clip(task, start, now);
+    }
+
+    // tasks sitting in doing, review or blocked, by how long since their last move
+    let mut aging: Vec<(i64, String, String, f64)> = db.prepare(
+        "SELECT t.id, t.title, t.status, COALESCE((SELECT MAX(e.created_at) FROM events e WHERE e.task_id = t.id AND e.type = 'task.status'), t.created_at)
+         FROM tasks t WHERE t.deleted_at IS NULL AND t.status IN ('doing', 'review', 'blocked')")?
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, (now - r.get::<_, i64>(3)?) as f64 / DAY as f64)))?
+        .collect::<rusqlite::Result<_>>()?;
+    aging.sort_by(|a, b| b.3.total_cmp(&a.3));
+
+    let tomorrow = next_day(today);
+    let done_in = |a: i64| -> Result<i64> { Ok(db.query_row("SELECT COUNT(*) FROM tasks WHERE deleted_at IS NULL AND done_at >= ?1 AND done_at < ?2", [a, now], |r| r.get(0))?) };
+    Ok(json!({
+        "period": period,
+        "window": { "from": iso(from), "to": iso(now), "label": if period == "week" { format!("{} – {}", fmt_day(from), fmt_day(now)) } else { fmt_day(from) } },
+        "totals": {
+            "done": done_in(from)?,
+            "added": db.query_row("SELECT COUNT(*) FROM tasks WHERE deleted_at IS NULL AND created_at >= ?1 AND created_at < ?2", [from, now], |r| r.get::<_, i64>(0))?,
+            "open": open.len(),
+            "doing": open.iter().filter(|t| t.status == "doing").count(),
+            "blocked": open.iter().filter(|t| t.status == "blocked").count(),
+            "overdue": open.iter().filter(|t| t.due_at.is_some_and(|d| d < today)).count(),
+        },
+        "streak_days": streak(&long, &crate::time::last_days(60, now)),
+        "done_per_day": per_day.iter().zip(&days).map(|(n, d)| json!({ "day": fmt_day(*d), "done": n })).collect::<Value>(),
+        "cycle_time_hours": { "tasks": cycles.len(), "median": median(cycles.clone()).map(round), "average": (!cycles.is_empty()).then(|| round(cycles.iter().sum::<f64>() / cycles.len() as f64)) },
+        "blocked_hours": { "total": round(hours(blocked_ms)), "tasks": blocked_tasks.len() },
+        "projects": project_stats(db, from)?.into_iter().map(|p| json!({ "project": p.slug, "open": p.open, "done": p.done })).collect::<Value>(),
+        "sitting_still": aging.iter().take(8).map(|(id, title, status, days)| json!({ "id": fmt_id(*id), "title": title, "status": status, "days": round(*days) })).collect::<Value>(),
+        "carry_over": open.iter().filter(|t| matches!(t.status.as_str(), "doing" | "review") || t.due_at.is_some_and(|d| d < tomorrow)).map(Task::brief).collect::<Value>(),
+    }))
+}
+
 // ---------- facts ----------
 
 pub struct Commit {
@@ -670,6 +772,34 @@ mod tests {
         assert_eq!(done_per_day(&db, 3, wed).unwrap(), [1, 0, 2]); // Mon, Tue, Wed
         let p = project_stats(&db, at("2026-10-27T00:00")).unwrap();
         assert_eq!(p.iter().map(|p| (p.slug.as_str(), p.open, p.done)).collect::<Vec<_>>(), [("api", 0, 0), ("web", 1, 1)]);
+    }
+
+    #[test]
+    fn report_measures_cycle_time_blocked_time_streak_and_what_sits_still() {
+        let db = db();
+        let h = 3_600_000;
+        let mon = at("2026-10-26T10:00");
+        let (tue, wed) = (mon + 24 * h, mon + 48 * h);
+        let to = |id: &str, status, reason, at| update_task(&db, id, &Patch { status: Some(status), blocked_reason: reason, ..Default::default() }, at).unwrap();
+        add(&db, "A", None, None, mon);
+        to("1", "doing", None, tue);
+        to("1", "done", None, wed);
+        add(&db, "B", Some("doing"), None, mon);
+        to("2", "done", None, mon + 6 * h);
+        add(&db, "C", None, None, mon);
+        to("3", "blocked", Some("keys"), tue + 2 * h);
+        to("3", "doing", None, tue + 4 * h);
+        add(&db, "D", None, None, mon);
+        to("4", "blocked", Some("design"), wed - h);
+
+        let r = report(&db, "week", wed + 2 * h).unwrap();
+        assert_eq!(r["totals"]["done"], 2);
+        assert_eq!(r["cycle_time_hours"]["median"], 15.0); // 6 h and 24 h
+        assert_eq!(r["blocked_hours"], json!({ "total": 5.0, "tasks": 2 })); // C for 2 h, D for 3 h so far
+        assert_eq!(r["streak_days"], 1); // done Wed, nothing Tue
+        assert_eq!(r["sitting_still"][0]["title"], "C");
+        assert_eq!(r["carry_over"].as_array().unwrap().len(), 1); // C, in doing
+        assert!(report(&db, "year", wed).is_err());
     }
 
     #[test]

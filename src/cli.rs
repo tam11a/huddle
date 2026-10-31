@@ -23,6 +23,7 @@ pub fn usage() -> String {
                                and a post-commit hook moves tasks named in commits: "#12" starts it, "fixes #12" finishes it)
   project list
   facts last_workday|today|week
+  report [today|week]          numbers for a report: done per day, streak, cycle time, time blocked, what sits still, carry-overs
 dates: 2026-10-31, 2026-10-31T09:30, today, tomorrow 9:30, fri, +2h"##, board::db_file(), board::STATUSES.join(", "))
 }
 
@@ -92,6 +93,7 @@ pub fn run(args: &[String], db: &Connection) -> Result<Out> {
             _ => err(format!("project add|list\n\n{}", usage())),
         },
         Some("facts") => json(board::facts(db, need(arg(1), "period")?, now())?),
+        Some("report") => json(board::report(db, arg(1).unwrap_or("today"), now())?),
         Some("hook") => Ok(Out::Text(crate::hooks::run(db, arg(1), now())?)),
         Some("help") | None => Ok(Out::Text(usage())),
         Some(cmd) => err(format!("unknown command \"{cmd}\"\n\n{}", usage())),

@@ -90,6 +90,7 @@ fn call(db: &Connection, name: &str, a: &Value) -> Result<Value> {
         }
         "list_projects" => board::list_projects(db)?.into_iter().map(|(slug, path)| json!({ "slug": slug, "path": path })).collect(),
         "facts" => board::facts(db, &need("period")?, n)?,
+        "report" => board::report(db, s("period").as_deref().unwrap_or("today"), n)?,
         _ => return err(format!("unknown tool {name}")),
     })
 }
@@ -180,6 +181,14 @@ fn tools() -> Value {
                 "period": { "type": "string", "enum": PERIODS, "description": "last_workday is the most recent day with any activity" },
             }},
         },
+        {
+            "name": "report",
+            "description": "The numbers for a daily or weekly report with charts: totals, tasks done on each of the last 14 days, workday streak, cycle time (doing → done), hours blocked, per-project counts, tasks sitting still in doing/review/blocked, and what carries over.",
+            "annotations": read_only,
+            "inputSchema": { "type": "object", "properties": {
+                "period": { "type": "string", "enum": ["today", "week"], "description": "Defaults to today" },
+            }},
+        },
     ])
 }
 
@@ -205,7 +214,7 @@ mod tests {
         assert_eq!(handle(&db, r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#), None);
         let names: Vec<String> = rpc(&db, "tools/list", json!({}))["result"]["tools"].as_array().unwrap()
             .iter().map(|t| t["name"].as_str().unwrap().to_string()).collect();
-        assert_eq!(names, ["add_task", "move_task", "update_task", "list_tasks", "add_note", "add_project", "list_projects", "facts"]);
+        assert_eq!(names, ["add_task", "move_task", "update_task", "list_tasks", "add_note", "add_project", "list_projects", "facts", "report"]);
         assert_eq!(rpc(&db, "nope", json!({}))["error"]["code"], -32601);
         assert_eq!(handle(&db, "{not json").unwrap()["error"]["code"], -32700);
     }

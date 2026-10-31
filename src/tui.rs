@@ -51,6 +51,7 @@ pub struct State {
     pub rows: Vec<i64>,
     pub prompt: Option<Prompt>,
     pub standup: Option<(Value, Value)>,
+    pub report: Option<(Value, Instant)>,
     pub help: bool,
     pub msg: String,
     pub err: bool,
@@ -73,6 +74,7 @@ impl State {
             rows: vec![0; STATUSES.len()],
             prompt: None,
             standup: None,
+            report: None,
             help: false,
             msg: String::new(),
             err: false,
@@ -130,9 +132,10 @@ pub fn press(s: &mut State, k: &str, db: &Connection, now: i64) {
     s.err = false;
     let r = if s.prompt.is_some() {
         type_into(s, k, db, now)
-    } else if s.help || s.standup.is_some() {
+    } else if s.help || s.standup.is_some() || s.report.is_some() {
         s.help = false;
         s.standup = None;
+        s.report = None;
         Ok(())
     } else {
         board_key(s, k, db, now)
@@ -200,6 +203,7 @@ fn board_key(s: &mut State, k: &str, db: &Connection, now: i64) -> Result<()> {
         "q" => s.quit = true,
         "?" => s.help = true,
         "s" => s.standup = Some((board::facts(db, "last_workday", now)?, board::facts(db, "today", now)?)),
+        "r" => s.report = Some((board::report(db, "week", now)?, Instant::now())),
         "a" => ask(s, "New task", "", Action::Add),
         _ => {
             let Some(t) = t else { return Ok(()) }; // the rest act on the selected task
@@ -384,8 +388,11 @@ mod tests {
         assert!(!s.help && s.standup.is_none());
         keys(&mut s, &db, &["s"]);
         assert!(has(&screen(&mut s, &b, now()), "Blockers"));
+        keys(&mut s, &db, &["q", "r"]);
+        let lines = screen(&mut s, &b, now());
+        assert!(has(&lines, "cycle time") && has(&lines, "sitting still") && has(&lines, "carries over"));
         keys(&mut s, &db, &["q"]);
-        assert!(s.standup.is_none() && !s.quit);
+        assert!(s.standup.is_none() && s.report.is_none() && !s.quit);
         keys(&mut s, &db, &["q"]);
         assert!(s.quit);
     }

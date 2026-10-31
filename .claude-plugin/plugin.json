@@ -1,7 +1,7 @@
 {
   "name": "huddle",
   "description": "A personal scrum board and stand-up assistant for Claude Code: tasks, blockers, stand-ups, daily plans, end-of-day and weekly reviews, all in one local SQLite file",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "author": { "name": "tam11a" },
   "license": "MIT",
   "keywords": ["scrum", "standup", "tasks", "productivity"],

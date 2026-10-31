@@ -38,6 +38,7 @@ const FLASH: Duration = Duration::from_millis(700);
 const TOAST: Duration = Duration::from_secs(4);
 const POP: Duration = Duration::from_millis(150);
 const FRAME: Duration = Duration::from_millis(33);
+const REPORT: Duration = Duration::from_millis(900);
 
 pub struct View<'a> {
     pub now: i64,
@@ -103,6 +104,7 @@ pub fn next_frame(s: &State, t: Instant) -> Duration {
         || (!s.msg.is_empty() && progress(t, s.toast, TOAST) < 1.0)
         || (s.gauge - s.gauge_to).abs() > 0.002
         || s.grow < 1.0
+        || s.report.as_ref().is_some_and(|(_, at)| progress(t, *at, REPORT) < 1.0)
         || s.prompt.as_ref().is_some_and(|p| progress(t, p.opened, POP) < 1.0);
     if moving { FRAME } else if s.prompt.is_some() { Duration::from_millis(530) } else { Duration::from_secs(60) }
 }
@@ -129,7 +131,7 @@ pub fn draw(f: &mut Frame, s: &mut State, b: &Board, v: &View) {
     if roomy {
         let [detail, chart, projects] = Layout::horizontal([Constraint::Fill(3), Constraint::Fill(3), Constraint::Fill(2)]).areas(info);
         task_panel(f, detail, sel.as_ref(), v.now);
-        chart_panel(f, chart, s, b, v.now);
+        chart_panel(f, chart, s.grow, b, v.now);
         project_panel(f, projects, b);
     }
     footer(f, foot, s, v.t);
@@ -138,6 +140,9 @@ pub fn draw(f: &mut Frame, s: &mut State, b: &Board, v: &View) {
     }
     if let Some(sd) = &s.standup {
         standup(f, area, sd);
+    }
+    if let Some((r, at)) = &s.report {
+        report(f, area, b, r, *at, v);
     }
     if let Some(p) = &s.prompt {
         prompt(f, area, p, v.t);
@@ -276,7 +281,7 @@ fn task_panel(f: &mut Frame, area: Rect, t: Option<&Task>, now: i64) {
     f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }).block(block), area);
 }
 
-fn chart_panel(f: &mut Frame, area: Rect, s: &State, b: &Board, now: i64) {
+fn chart_panel(f: &mut Frame, area: Rect, grow: f64, b: &Board, now: i64) {
     let n = b.per_day.len().max(1);
     let total: u64 = b.per_day.iter().sum();
     let max = b.per_day.iter().copied().max().unwrap_or(0).max(1);
@@ -287,7 +292,7 @@ fn chart_panel(f: &mut Frame, area: Rect, s: &State, b: &Board, now: i64) {
         let tone = mix(TEAL, GREEN, i as f64 / (n - 1).max(1) as f64);
         let label: String = fmt_day(day).chars().take(if width >= 2 { 2 } else { 1 }).collect();
         Bar::default()
-            .value((d as f64 * s.grow).round() as u64)
+            .value((d as f64 * grow).round() as u64)
             .text_value(if d > 0 && width >= 2 { d.to_string() } else { String::new() })
             .label(Line::styled(label, fg(if i == n - 1 { TEXT } else { DIM })))
             .style(fg(tone))
@@ -324,7 +329,7 @@ fn project_panel(f: &mut Frame, area: Rect, b: &Board) {
 }
 
 fn footer(f: &mut Frame, area: Rect, s: &State, t: Instant) {
-    let keys = [("←→↑↓", "pick"), ("< >", "move"), ("d", "done"), ("b", "block"), ("a", "add"), ("e", "edit"), ("t", "due"), ("p", "prio"), ("x", "del"), ("s", "stand-up"), ("?", "help"), ("q", "quit")];
+    let keys = [("←→↑↓", "pick"), ("< >", "move"), ("d", "done"), ("b", "block"), ("a", "add"), ("e", "edit"), ("t", "due"), ("p", "prio"), ("x", "del"), ("s", "stand-up"), ("r", "report"), ("?", "help"), ("q", "quit")];
     let hints: Vec<Span> = keys.iter().flat_map(|(k, d)| [Span::styled(format!(" {k}"), bold(PINK)), Span::styled(format!(" {d} "), fg(DIM))]).collect();
     let age = progress(t, s.toast, TOAST);
     let toast = if s.msg.is_empty() || age >= 1.0 { String::new() } else { format!(" {} {} ", if s.err { "✖" } else { "✔" }, s.msg) };
@@ -379,6 +384,7 @@ fn help(f: &mut Frame, area: Rect) {
         ("p", "raise the priority"),
         ("x", "delete it"),
         ("s", "stand-up for today"),
+        ("r", "report: this week in numbers"),
         ("?", "this help"),
         ("q   ctrl-c", "quit"),
     ];
@@ -428,6 +434,71 @@ fn standup(f: &mut Frame, area: Rect, (y, t): &(Value, Value)) {
     let h = (lines.len() as u16 + 4).min(area.height.saturating_sub(2));
     let (r, block) = overlay(f, centered(area, 76, h), "stand-up", "any key closes", BLUE);
     f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }).block(block), r);
+}
+
+fn hours_text(h: Option<f64>) -> String {
+    match h {
+        None => "–".into(),
+        Some(h) if h >= 24.0 => format!("{:.1} d", h / 24.0),
+        Some(h) => format!("{h:.1} h"),
+    }
+}
+
+fn tile(f: &mut Frame, area: Rect, label: &str, value: String, sub: String, color: Rgb) {
+    let block = Block::bordered().border_type(BorderType::Rounded).border_style(fg(color));
+    let lines = vec![Line::styled(label.to_string(), fg(DIM)), Line::styled(value, bold(color)), Line::styled(sub, fg(DIM))];
+    f.render_widget(Paragraph::new(lines).centered().block(block), area);
+}
+
+/// The week in numbers: tiles that count up, the charts, what's sitting still and what carries over.
+fn report(f: &mut Frame, area: Rect, b: &Board, r: &Value, at: Instant, v: &View) {
+    let grow = 1.0 - (1.0 - progress(v.t, at, REPORT)).powi(3);
+    let n = |v: &Value| v.as_i64().unwrap_or(0);
+    let up = |v: &Value| ((n(v) as f64) * grow).round() as i64;
+    let t = &r["totals"];
+    let label = format!("report · this week · {}", r["window"]["label"].as_str().unwrap_or(""));
+    let (r_area, block) = overlay(f, area, &label, "any key closes", MAUVE);
+    let inner = block.inner(r_area);
+    f.render_widget(block, r_area);
+    let [tiles, mid, low] = Layout::vertical([Constraint::Length(5), Constraint::Fill(1), Constraint::Fill(1)]).areas(inner);
+
+    let cells = Layout::horizontal([Constraint::Ratio(1, 5); 5]).spacing(1).split(tiles);
+    let cycle = &r["cycle_time_hours"];
+    let blocked = &r["blocked_hours"];
+    tile(f, cells[0], "done", up(&t["done"]).to_string(), format!("{} added", n(&t["added"])), GREEN);
+    tile(f, cells[1], "streak", format!("{} days", up(&r["streak_days"])), "workdays in a row".into(), PEACH);
+    tile(f, cells[2], "cycle time", hours_text(cycle["median"].as_f64()), format!("median of {} tasks", n(&cycle["tasks"])), BLUE);
+    tile(f, cells[3], "blocked", hours_text(blocked["total"].as_f64().filter(|h| *h > 0.0)), format!("{} tasks", n(&blocked["tasks"])), RED);
+    tile(f, cells[4], "open", up(&t["open"]).to_string(), format!("{} doing · {} overdue", n(&t["doing"]), n(&t["overdue"])), YELLOW);
+
+    let [chart, projects] = Layout::horizontal([Constraint::Fill(3), Constraint::Fill(2)]).areas(mid);
+    chart_panel(f, chart, grow, b, v.now);
+    project_panel(f, projects, b);
+
+    let [still, carry] = Layout::horizontal([Constraint::Fill(1), Constraint::Fill(1)]).areas(low);
+    let status_color = |s: &str| COLUMN[STATUSES.iter().position(|x| *x == s).unwrap_or(0)];
+    let still_lines: Vec<Line> = r["sitting_still"].as_array().cloned().unwrap_or_default().iter().map(|x| {
+        let days = x["days"].as_f64().unwrap_or(0.0);
+        let age = if days >= 5.0 { RED } else if days >= 2.0 { PEACH } else { DIM };
+        let status = x["status"].as_str().unwrap_or("");
+        Line::from(vec![
+            Span::styled(format!("{days:>5.1} d  "), bold(age)),
+            Span::styled(format!("{status:<8}"), fg(status_color(status))),
+            Span::styled(format!("{} {}", x["id"].as_str().unwrap_or(""), x["title"].as_str().unwrap_or("")), fg(TEXT)),
+        ])
+    }).collect();
+    let carry_lines: Vec<Line> = r["carry_over"].as_array().cloned().unwrap_or_default().iter().map(|x| {
+        let status = x["status"].as_str().unwrap_or("");
+        let due = x["due"].as_str().map(|d| format!("  ◷ {d}")).unwrap_or_default();
+        Line::from(vec![
+            Span::styled("▶ ", fg(status_color(status))),
+            Span::styled(format!("{} {}", x["id"].as_str().unwrap_or(""), x["title"].as_str().unwrap_or("")), fg(TEXT)),
+            Span::styled(due, fg(DIM)),
+        ])
+    }).collect();
+    let empty = |lines: Vec<Line<'static>>, text: &'static str| if lines.is_empty() { vec![Line::styled(text, fg(DIM))] } else { lines };
+    f.render_widget(Paragraph::new(empty(still_lines, "nothing in doing, review or blocked")).block(panel(" sitting still ".into(), PEACH).padding(Padding::horizontal(1))), still);
+    f.render_widget(Paragraph::new(empty(carry_lines, "nothing carries over")).block(panel(" carries over ".into(), BLUE).padding(Padding::horizontal(1))), carry);
 }
 
 fn intro(f: &mut Frame, area: Rect, age: Duration, now: i64) {

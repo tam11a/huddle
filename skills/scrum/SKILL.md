@@ -70,6 +70,13 @@ Use the matching one when the user asks for it. Anything the user adds after the
 2. At most 15 lines: **Done** (grouped by project), **Slipped** (overdue, and anything that sat in doing all week), **Next week** (top 5 open tasks by due date and priority).
 3. Offer to save it as a report. Save only on yes.
 
+### Daily or weekly report ("report", "daily report", "how did my week go")
+
+1. Get `report` for `today` (or `week`), and `facts` for the same period.
+2. If you can publish a page here (an Artifact tool), make it a one-page report with real charts: tasks done per day (bars), the totals as stat tiles (done, streak, cycle time, hours blocked, open and overdue), done and open per project, what's sitting still, and what carries over. Use only the numbers from `report` and `facts`.
+3. Otherwise, write it as markdown: the totals in one line, a bar chart of done per day drawn with `█`, then sitting still and carry-overs as short lists.
+4. Tell the user they can press `r` in the `huddle` board for the same report in the terminal.
+
 ### Plan from a document
 
 1. Read the document the user names.
