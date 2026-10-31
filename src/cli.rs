@@ -15,9 +15,15 @@ pub fn usage() -> String {
   (no command, in a terminal)                 open the interactive board
   mcp                                         serve these commands as MCP tools over stdio (Claude connects to it)
   add "<title>" [--project p] [--due d] [--priority urgent|high|normal|low] [--status s] [--desc text]
+      [--sprint id|current] [--points n] [--parent id] [--every daily|weekdays|weekly|monthly] [--tags a,b]
   move <id> <status> [--reason text]          statuses: {} (blocked needs --reason)
   update <id> [--title t] [--due d|none] [--priority p] [--project p] [--desc text] [--delete] [--restore]
-  list [--status s|open|all] [--project p] [--query words] [--due-before d]
+      [--sprint id|current|none] [--points n|none] [--parent id|none] [--every rule|none] [--tags a,b]   (--tags replaces; "" clears)
+  list [--status s|open|all] [--project p] [--query words] [--due-before d] [--sprint id|current] [--tag t] [--parent id]
+  sprint add "<name>" [--project p] [--start d] [--end d|+14d] [--goal text]   (defaults: today, for two weeks)
+  sprint list [--all] | sprint show <id|current> | sprint close <id|current>
+  start <id>                   track time on a task (stops any running timer; backlog/todo moves to doing)
+  stop                         stop the running timer
   note "<text>" [--kind note|decision|report] [--task id] [--project p]
   project add <slug> [path] [--no-hook]   (path defaults to the current folder; its git commits feed the stand-up,
                                and a post-commit hook moves tasks named in commits: "#12" starts it, "fixes #12" finishes it)
@@ -27,8 +33,9 @@ pub fn usage() -> String {
 dates: 2026-10-31, 2026-10-31T09:30, today, tomorrow 9:30, fri, +2h"##, board::db_file(), board::STATUSES.join(", "))
 }
 
-const VALUES: [&str; 11] = ["project", "due", "priority", "status", "desc", "reason", "title", "query", "due-before", "kind", "task"];
-const FLAGS: [&str; 4] = ["delete", "restore", "help", "no-hook"];
+const VALUES: [&str; 20] = ["project", "due", "priority", "status", "desc", "reason", "title", "query", "due-before", "kind", "task",
+    "sprint", "points", "parent", "every", "tags", "tag", "start", "end", "goal"];
+const FLAGS: [&str; 5] = ["delete", "restore", "help", "no-hook", "all"];
 
 /// Splits argv into positionals and --options, the way the Node version's parseArgs did.
 fn parse(args: &[String]) -> Result<(Vec<String>, HashMap<String, String>)> {
@@ -72,6 +79,7 @@ pub fn run(args: &[String], db: &Connection) -> Result<Out> {
     match if o("help").is_some() { Some("help") } else { arg(0) } {
         Some("add") => task(board::add_task(db, &NewTask {
             title: need(Some(rest), "title")?, project: o("project"), due: o("due"), priority: o("priority"), status: o("status"), description: o("desc"),
+            sprint: o("sprint"), points: o("points"), parent: o("parent"), recur: o("every"), tags: o("tags"),
         }, now())?),
         Some("move") => task(board::update_task(db, need(arg(1), "task id")?, &Patch {
             status: Some(need(arg(2), "status")?), blocked_reason: o("reason"), ..Default::default()
@@ -79,9 +87,11 @@ pub fn run(args: &[String], db: &Connection) -> Result<Out> {
         Some("update") => task(board::update_task(db, need(arg(1), "task id")?, &Patch {
             title: o("title"), due: o("due"), priority: o("priority"), project: o("project"), status: o("status"),
             blocked_reason: o("reason"), description: o("desc"), delete: o("delete").is_some(), restore: o("restore").is_some(),
+            sprint: o("sprint"), points: o("points"), parent: o("parent"), recur: o("every"), tags: o("tags"),
         }, now())?),
         Some("list") => json(board::list_tasks(db, &Filter {
-            status: o("status"), project: o("project"), query: o("query"), due_before: o("due-before"), limit: Some(50), ..Default::default()
+            status: o("status"), project: o("project"), query: o("query"), due_before: o("due-before"), limit: Some(50),
+            sprint: o("sprint"), tag: o("tag"), parent: o("parent"), ..Default::default()
         }, now())?.iter().map(board::Task::view).collect()),
         Some("note") => json(board::add_note(db, need(Some(rest), "note text")?, o("kind"), o("task"), o("project"), now())?),
         Some("project") => match arg(1) {
@@ -92,6 +102,15 @@ pub fn run(args: &[String], db: &Connection) -> Result<Out> {
             Some("list") => json(board::list_projects(db)?.into_iter().map(|(slug, path)| serde_json::json!({ "slug": slug, "path": path })).collect()),
             _ => err(format!("project add|list\n\n{}", usage())),
         },
+        Some("sprint") => match arg(1) {
+            Some("add") => json(board::add_sprint(db, need(Some(p.get(2..).unwrap_or_default().join(" ").as_str()), "sprint name")?, o("project"), o("start"), o("end"), o("goal"), now())?),
+            Some("list") => json(board::list_sprints(db, o("all").is_some(), now())?.into()),
+            Some("show") => json(board::sprint_detail(db, arg(2).unwrap_or("current"), now())?),
+            Some("close") => json(board::close_sprint(db, need(arg(2), "sprint id")?, now())?),
+            _ => err(format!("sprint add|list|show|close\n\n{}", usage())),
+        },
+        Some("start") => json(board::start_timer(db, need(arg(1), "task id")?, now())?),
+        Some("stop") => json(board::stop_timer(db, now())?),
         Some("facts") => json(board::facts(db, need(arg(1), "period")?, now())?),
         Some("report") => json(board::report(db, arg(1).unwrap_or("today"), now())?),
         Some("hook") => Ok(Out::Text(crate::hooks::run(db, arg(1), now())?)),

@@ -1,13 +1,14 @@
 // Drawing the board: a btop-style dashboard with a little motion.
 // Colours are truecolor (Catppuccin Mocha); NO_COLOR turns them off.
-use crate::board::{STATUSES, Task, fmt_id};
+use crate::board::{STATUSES, Task, fmt_id, fmt_minutes};
 use crate::time::{fmt_day, fmt_hm, fmt_when, hour, last_days, next_day, start_of_day};
 use crate::tui::{Action, Board, PRIORITY, Prompt, State, listed, selected, shown};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Bar, BarChart, BarGroup, Block, BorderType, Clear, Gauge, Padding, Paragraph, Wrap};
+use ratatui::symbols::Marker;
+use ratatui::widgets::{Axis, Bar, BarChart, BarGroup, Block, BorderType, Chart, Clear, Dataset, Gauge, GraphType, Padding, Paragraph, Wrap};
 use serde_json::Value;
 use std::collections::HashSet;
 use std::sync::OnceLock;
@@ -105,6 +106,7 @@ pub fn next_frame(s: &State, t: Instant) -> Duration {
         || (s.gauge - s.gauge_to).abs() > 0.002
         || s.grow < 1.0
         || s.report.as_ref().is_some_and(|(_, at)| progress(t, *at, REPORT) < 1.0)
+        || s.sprint_view.as_ref().is_some_and(|(_, at)| progress(t, *at, REPORT) < 1.0)
         || s.prompt.as_ref().is_some_and(|p| progress(t, p.opened, POP) < 1.0);
     if moving { FRAME } else if s.prompt.is_some() { Duration::from_millis(530) } else if s.focus.is_some() { Duration::from_secs(1) } else { Duration::from_secs(60) }
 }
@@ -148,6 +150,9 @@ pub fn draw(f: &mut Frame, s: &mut State, b: &Board, v: &View) {
     }
     if let Some((r, at)) = &s.report {
         report(f, area, b, r, *at, v);
+    }
+    if let Some((sp, at)) = &s.sprint_view {
+        sprint_screen(f, area, sp, *at, v.t);
     }
     if let Some(p) = &s.prompt {
         prompt(f, area, p, v.t);
@@ -194,6 +199,8 @@ fn header(f: &mut Frame, area: Rect, s: &State, b: &Board, v: &View) {
         Span::styled(format!("{due} due today"), fg(tone(due, YELLOW))),
         Span::styled("   ✔ ", fg(tone(done, GREEN))),
         Span::styled(format!("{done} done today"), fg(tone(done, GREEN))),
+        Span::styled(b.sprints.first().map(|sp| format!("   ◆ {} {}/{} {} · {}d left", sp["name"].as_str().unwrap_or(""),
+            sp["done"], sp["scope"], sp["unit"].as_str().unwrap_or(""), sp["days_left"])).unwrap_or_default(), bold(MAUVE)),
         Span::styled(if v.file.is_empty() { String::new() } else { format!("   {}", v.file) }, fg(SUBTLE)),
     ])), left);
     let gauge = match &s.focus {
@@ -267,11 +274,26 @@ fn card(t: &Task, color: Rgb, selected: bool, flash: Option<(i64, Instant)>, now
         let (label, tone) = if d < today { (fmt_day(d), RED) } else if d < tomorrow { (format!("today {}", fmt_hm(d)), YELLOW) } else { (fmt_day(d), DIM) };
         meta.push(Span::styled(format!("◷ {label}  "), fg(if done { DIM } else { tone })));
     }
-    if let Some(p) = &t.project {
-        meta.push(Span::styled(format!("#{p}  "), fg(TEAL)));
-    }
     if let Some(r) = t.blocked_reason.as_ref().filter(|r| !r.is_empty()) {
-        meta.push(Span::styled(format!("⊘ {r}"), fg(RED)));
+        meta.push(Span::styled(format!("⊘ {r}  "), fg(RED)));
+    }
+    if let Some(pts) = t.points {
+        meta.push(Span::styled(format!("{pts}p "), bold(MAUVE)));
+    }
+    if t.subtasks.1 > 0 {
+        meta.push(Span::styled(format!("☐{}/{} ", t.subtasks.0, t.subtasks.1), fg(BLUE)));
+    }
+    if t.spent > 0 {
+        meta.push(Span::styled(format!("⧗{} ", fmt_minutes(t.spent)), fg(PEACH)));
+    }
+    if t.recur.is_some() {
+        meta.push(Span::styled("↻ ", fg(GREEN)));
+    }
+    if let Some(p) = &t.project {
+        meta.push(Span::styled(format!("#{p} "), fg(TEAL)));
+    }
+    for tag in &t.tags {
+        meta.push(Span::styled(format!("•{tag} "), fg(PINK)));
     }
     let p = Paragraph::new(vec![first, Line::from(meta)]);
     match bg {
@@ -343,6 +365,31 @@ fn task_panel(f: &mut Frame, area: Rect, t: Option<&Task>, now: i64) {
     if let Some(r) = t.blocked_reason.as_ref().filter(|r| !r.is_empty()) {
         lines.push(Line::styled(format!("⊘ blocked: {r}"), fg(RED)));
     }
+    let mut more = vec![];
+    if let Some(sp) = &t.sprint {
+        more.push(Span::styled(format!("◆ {sp}   "), fg(MAUVE)));
+    }
+    if let Some(pts) = t.points {
+        more.push(Span::styled(format!("{pts} points   "), fg(MAUVE)));
+    }
+    if t.subtasks.1 > 0 {
+        more.push(Span::styled(format!("☐ {}/{} subtasks   ", t.subtasks.0, t.subtasks.1), fg(BLUE)));
+    }
+    if let Some(p) = t.parent_id {
+        more.push(Span::styled(format!("↳ subtask of {}   ", fmt_id(p)), fg(BLUE)));
+    }
+    if t.spent > 0 {
+        more.push(Span::styled(format!("⧗ {} tracked   ", fmt_minutes(t.spent)), fg(PEACH)));
+    }
+    if let Some(r) = &t.recur {
+        more.push(Span::styled(format!("↻ {r}   "), fg(GREEN)));
+    }
+    if !t.tags.is_empty() {
+        more.push(Span::styled(t.tags.iter().map(|g| format!("•{g}")).collect::<Vec<_>>().join(" "), fg(PINK)));
+    }
+    if !more.is_empty() {
+        lines.push(Line::from(more));
+    }
     if !t.description.is_empty() {
         lines.push(Line::styled(t.description.clone(), fg(DIM)));
     }
@@ -398,7 +445,7 @@ fn project_panel(f: &mut Frame, area: Rect, b: &Board) {
 }
 
 fn footer(f: &mut Frame, area: Rect, s: &State, t: Instant) {
-    let keys = [("?", "help"), ("←→↑↓", "pick"), ("< >", "move"), ("d", "done"), ("b", "block"), ("a", "add"), ("/", "search"), ("tab", "list"), ("f", "focus"), ("u", "undo"), ("s", "stand-up"), ("r", "report"), ("q", "quit")];
+    let keys = [("?", "help"), ("←→↑↓", "pick"), ("< >", "move"), ("d", "done"), ("b", "block"), ("a", "add"), ("/", "search"), ("tab", "list"), ("f", "focus"), ("u", "undo"), ("s", "stand-up"), ("r", "report"), ("S", "sprint"), ("q", "quit")];
     let hints: Vec<Span> = keys.iter().flat_map(|(k, d)| [Span::styled(format!(" {k}"), bold(PINK)), Span::styled(format!(" {d} "), fg(DIM))]).collect();
     let age = progress(t, s.toast, TOAST);
     let toast = if s.msg.is_empty() || age >= 1.0 { String::new() } else { format!(" {} {} ", if s.err { "✖" } else { "✔" }, s.msg) };
@@ -454,6 +501,7 @@ fn help(f: &mut Frame, area: Rect) {
         ("a", "add a task to this column"),
         ("e  E", "edit the title, or the description"),
         ("o", "set the project"),
+        ("n  g", "set story points, or tags"),
         ("t", "set the due date"),
         ("p", "raise the priority"),
         ("x", "delete it"),
@@ -465,6 +513,7 @@ fn help(f: &mut Frame, area: Rect) {
         ("esc", "clear search and project filter"),
         ("s", "stand-up for today"),
         ("r", "report: this week in numbers"),
+        ("S", "sprint: progress and burndown"),
         ("?", "this help"),
         ("q   ctrl-c", "quit"),
     ];
@@ -583,6 +632,56 @@ fn report(f: &mut Frame, area: Rect, b: &Board, r: &Value, at: Instant, v: &View
     let empty = |lines: Vec<Line<'static>>, text: &'static str| if lines.is_empty() { vec![Line::styled(text, fg(DIM))] } else { lines };
     f.render_widget(Paragraph::new(empty(still_lines, "nothing in doing, review or blocked")).block(panel(" sitting still ".into(), PEACH).padding(Padding::horizontal(1))), still);
     f.render_widget(Paragraph::new(empty(carry_lines, "nothing carries over")).block(panel(" carries over ".into(), BLUE).padding(Padding::horizontal(1))), carry);
+}
+
+/// The running sprint: goal, progress, a burndown that draws itself in, and what's still open.
+fn sprint_screen(f: &mut Frame, area: Rect, sp: &Value, at: Instant, t: Instant) {
+    let grow = 1.0 - (1.0 - progress(t, at, REPORT)).powi(3);
+    let str_ = |v: &Value| v.as_str().unwrap_or("").to_string();
+    let n = |v: &Value| v.as_f64().unwrap_or(0.0);
+    let title = format!("sprint {} · {} · {} – {}", str_(&sp["id"]), str_(&sp["name"]), str_(&sp["starts"]), str_(&sp["ends"]));
+    let (r, block) = overlay(f, area, &title, "any key closes", MAUVE);
+    let inner = block.inner(r);
+    f.render_widget(block, r);
+    let [top, gauge, chart, open] = Layout::vertical([Constraint::Length(2), Constraint::Length(1), Constraint::Fill(2), Constraint::Fill(1)]).spacing(1).areas(inner);
+
+    let goal = str_(&sp["goal"]);
+    f.render_widget(Paragraph::new(vec![
+        Line::from(vec![Span::styled("goal  ", fg(DIM)), Span::styled(if goal.is_empty() { "—".into() } else { goal }, bold(TEXT))]),
+        Line::from(vec![
+            Span::styled(format!("{} days left", sp["days_left"]), fg(YELLOW)),
+            Span::styled(format!("   {}/{} tasks done", sp["tasks"]["done"], sp["tasks"]["total"]), fg(GREEN)),
+            Span::styled(format!("   {}", str_(&sp["state"])), fg(DIM)),
+        ]),
+    ]), top);
+    let (done, scope) = (n(&sp["done"]), n(&sp["scope"]).max(1.0));
+    f.render_widget(Gauge::default().ratio((done / scope * grow).clamp(0.0, 1.0)).use_unicode(true)
+        .label(format!("{} of {} {}", sp["done"], sp["scope"], str_(&sp["unit"])))
+        .gauge_style(Style::new().fg(c(MAUVE)).bg(c(SURFACE))), gauge);
+
+    let days = sp["burndown"].as_array().cloned().unwrap_or_default();
+    let shown = ((days.len() as f64) * grow).ceil() as usize;
+    let remaining: Vec<(f64, f64)> = days.iter().take(shown).enumerate().map(|(i, d)| (i as f64 + 1.0, n(&d["remaining"]))).collect();
+    let ideal: Vec<(f64, f64)> = std::iter::once((0.0, scope)).chain(days.iter().enumerate().map(|(i, d)| (i as f64 + 1.0, n(&d["ideal"])))).collect();
+    let remaining: Vec<(f64, f64)> = std::iter::once((0.0, scope)).chain(remaining).collect();
+    let span = (days.len() as f64).max(1.0);
+    let label = |d: Option<&Value>| Span::styled(d.map(|d| str_(&d["day"])).unwrap_or_default(), fg(DIM));
+    let chart_w = Chart::new(vec![
+        Dataset::default().name("ideal").marker(Marker::Braille).graph_type(GraphType::Line).style(fg(SUBTLE)).data(&ideal),
+        Dataset::default().name("remaining").marker(Marker::Braille).graph_type(GraphType::Line).style(bold(PINK)).data(&remaining),
+    ])
+    .block(panel(" burndown ".into(), PINK))
+    .x_axis(Axis::default().bounds([0.0, span]).style(fg(SUBTLE)).labels([label(days.first()), label(days.last())]))
+    .y_axis(Axis::default().bounds([0.0, scope]).style(fg(SUBTLE)).labels([Span::styled("0", fg(DIM)), Span::styled(format!("{scope}"), fg(DIM))]));
+    f.render_widget(chart_w, chart);
+
+    let lines: Vec<Line> = sp["open"].as_array().cloned().unwrap_or_default().iter().map(|x| {
+        let status = str_(&x["status"]);
+        let color = COLUMN[STATUSES.iter().position(|s| *s == status).unwrap_or(0)];
+        Line::from(vec![Span::styled(format!("{status:<8} "), fg(color)), Span::styled(format!("{} {}", str_(&x["id"]), str_(&x["title"])), fg(TEXT))])
+    }).collect();
+    let lines = if lines.is_empty() { vec![Line::styled("everything in this sprint is done", fg(GREEN))] } else { lines };
+    f.render_widget(Paragraph::new(lines).block(panel(" still open ".into(), BLUE).padding(Padding::horizontal(1))), open);
 }
 
 fn intro(f: &mut Frame, area: Rect, age: Duration, now: i64) {

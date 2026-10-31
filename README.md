@@ -22,6 +22,9 @@ Tell Claude what you're working on, and it keeps the board for you. Each morning
 - **End of day:** an 8-line summary saved as a report; the next stand-up reads it.
 - **Weekly review:** what got done, what slipped, and the top 5 for next week.
 - **Reports with charts:** "daily report" or "how did my week go" gets you tasks done per day, your workday streak, cycle time (doing → done), hours blocked, per-project counts, what's sitting still and what carries over. In the Claude app it's a page with real charts; in the terminal, press `r` on the board.
+- **Sprints:** "plan a sprint" proposes a goal, dates and tasks with story points, and starts it on your yes. Track progress and a burndown chart (`S` on the board), and close it with what's unfinished listed.
+- **Subtasks, tags, repeating tasks:** break a task into subtasks (the card shows ☐ 2/5), tag tasks, and mark one `weekly` (or daily, weekdays, monthly): finishing it makes the next one, due at the next turn.
+- **Time tracking:** `huddle start #12` and `huddle stop`, or the focus timer on the board (`f`). Time shows on cards, in stand-ups and in reports.
 - **Plan from a document:** turns a spec or brief into proposed tasks, and creates them only after you say yes.
 - **Git-aware:** register a repo once (`huddle project add <slug>`), and your commits there show up in stand-ups. It also adds a post-commit hook: a commit that names `#12` starts that task, and `fixes #12` finishes it. Only tasks of that repo's project move, so GitHub issue numbers elsewhere are safe.
 - **Keeps Claude up to date:** when a Claude Code session starts, Claude sees what's in doing, blocked, in review and overdue, and whether the folder is a huddle project.
@@ -75,7 +78,7 @@ Set `SCRUM_DB` to use another file, for example one board per job. To set it for
 { "env": { "SCRUM_DB": "/home/you/.local/share/huddle/work.db" } }
 ```
 
-The schema is the same as Charlie Lite's, so `SCRUM_DB` can also point at a Charlie database and share its board.
+Huddle began with Charlie Lite's schema (migration 1 is still identical) and extends it with sprints, points, subtasks, tags, repeating tasks and time tracking (migration 2). It opens older boards and upgrades them in place, so keep it on its own board rather than one Charlie also writes to.
 
 ## The board in your terminal
 
@@ -88,7 +91,7 @@ To see the board, or fix it by hand, run `huddle` with no arguments. It's a dash
 
 It moves a little: a short intro, a flash on a card when it changes, notifications that slide in and fade, and a progress bar and chart that fill up. It only redraws while something is moving, so it uses almost no CPU when idle. It uses the same file and rules as Claude and refreshes every 2 seconds, so you can watch Claude change the board. It uses 24-bit colour; set `NO_COLOR=1` to turn colours off.
 
-Keys: arrows or `hjkl` to pick a task, `<` `>` to move it along backlog → todo → doing → review → done, `d` done, `b` block (asks for the reason; on a blocked task, unblocks it), `a` add, `e` edit the title, `E` the description, `o` the project, `t` set the due date, `p` raise the priority, `x` delete, `u` undo the last change, `/` search (filters as you type), `P` show one project at a time, `tab` switch between columns and a list, `esc` clear the filters, `f` focus: a 25-minute countdown on the selected task (it moves to doing; `f` again stops it), `s` stand-up, `r` report, `?` help, `q` quit.
+Keys: arrows or `hjkl` to pick a task, `<` `>` to move it along backlog → todo → doing → review → done, `d` done, `b` block (asks for the reason; on a blocked task, unblocks it), `a` add, `e` edit the title, `E` the description, `o` the project, `t` set the due date, `p` raise the priority, `x` delete, `u` undo the last change, `/` search (filters as you type), `P` show one project at a time, `tab` switch between columns and a list, `esc` clear the filters, `f` focus: a 25-minute countdown on the selected task (it moves to doing; `f` again stops it), `n` story points, `g` tags, `s` stand-up, `r` report, `S` sprint and burndown, `?` help, `q` quit.
 
 ## The commands
 

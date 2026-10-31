@@ -62,11 +62,18 @@ fn call(db: &Connection, name: &str, a: &Value) -> Result<Value> {
     let need = |k: &str| s(k).filter(|v| !v.is_empty()).ok_or_else(|| Error(format!("missing {k}")));
     let flag = |k: &str| a[k].as_bool().unwrap_or(false);
     let (project, due, priority, status, description) = (s("project"), s("due"), s("priority"), s("status"), s("description"));
+    let (sprint, points, parent, repeats) = (s("sprint"), s("points"), s("parent"), s("repeats"));
+    // tags may come as ["a", "b"] or "a, b"
+    let tags = match &a["tags"] {
+        Value::Array(t) => Some(t.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(",")),
+        _ => s("tags"),
+    };
     let n = now();
     Ok(match name {
         "add_task" => board::add_task(db, &NewTask {
             title: &need("title")?, project: project.as_deref(), due: due.as_deref(), priority: priority.as_deref(),
             status: status.as_deref(), description: description.as_deref(),
+            sprint: sprint.as_deref(), points: points.as_deref(), parent: parent.as_deref(), recur: repeats.as_deref(), tags: tags.as_deref(),
         }, n)?.view(),
         "move_task" => board::update_task(db, &need("id")?, &Patch {
             status: Some(&need("status")?), blocked_reason: s("reason").as_deref(), ..Default::default()
@@ -75,10 +82,11 @@ fn call(db: &Connection, name: &str, a: &Value) -> Result<Value> {
             title: s("title").as_deref(), due: due.as_deref(), priority: priority.as_deref(), project: project.as_deref(),
             status: status.as_deref(), blocked_reason: s("reason").as_deref(), description: description.as_deref(),
             delete: flag("delete"), restore: flag("restore"),
+            sprint: sprint.as_deref(), points: points.as_deref(), parent: parent.as_deref(), recur: repeats.as_deref(), tags: tags.as_deref(),
         }, n)?.view(),
         "list_tasks" => board::list_tasks(db, &Filter {
             status: status.as_deref(), project: project.as_deref(), query: s("query").as_deref(), due_before: s("due_before").as_deref(),
-            limit: Some(50), ..Default::default()
+            limit: Some(50), sprint: sprint.as_deref(), tag: s("tag").as_deref(), parent: parent.as_deref(), ..Default::default()
         }, n)?.iter().map(Task::view).collect(),
         "add_note" => board::add_note(db, &need("content")?, s("kind").as_deref(), s("task").as_deref(), project.as_deref(), n)?,
         "add_project" => {
@@ -91,6 +99,12 @@ fn call(db: &Connection, name: &str, a: &Value) -> Result<Value> {
         "list_projects" => board::list_projects(db)?.into_iter().map(|(slug, path)| json!({ "slug": slug, "path": path })).collect(),
         "facts" => board::facts(db, &need("period")?, n)?,
         "report" => board::report(db, s("period").as_deref().unwrap_or("today"), n)?,
+        "add_sprint" => board::add_sprint(db, &need("name")?, project.as_deref(), s("start").as_deref(), s("end").as_deref(), s("goal").as_deref(), n)?,
+        "list_sprints" => board::list_sprints(db, flag("all"), n)?.into(),
+        "sprint" => board::sprint_detail(db, sprint.as_deref().unwrap_or("current"), n)?,
+        "close_sprint" => board::close_sprint(db, &need("sprint")?, n)?,
+        "start_timer" => board::start_timer(db, &need("id")?, n)?,
+        "stop_timer" => board::stop_timer(db, n)?,
         _ => return err(format!("unknown tool {name}")),
     })
 }
@@ -101,6 +115,11 @@ fn tools() -> Value {
     let id = text("Task id: #12, 12 or O-12");
     let read_only = json!({ "readOnlyHint": true });
     let list_status = [STATUSES.as_slice(), &["open", "all"]].concat();
+    let sprint = text("A sprint id (#3) or \"current\" for the one running now");
+    let points = json!({ "type": ["integer", "string"], "description": "Story points, a whole number; \"none\" clears" });
+    let parent = text("The parent task's id, which makes this a subtask; \"none\" clears");
+    let repeats = json!({ "type": "string", "enum": ["daily", "weekdays", "weekly", "monthly", "none"], "description": "Finishing it makes the next copy, due at the next turn" });
+    let tags = json!({ "type": "array", "items": { "type": "string" }, "description": "Tags, like [\"frontend\", \"bug\"]" });
     json!([
         {
             "name": "add_task",
@@ -112,6 +131,11 @@ fn tools() -> Value {
                 "priority": priority,
                 "status": { "type": "string", "enum": STATUSES, "description": "Defaults to todo" },
                 "description": text("Longer notes"),
+                "sprint": sprint,
+                "points": points,
+                "parent": parent,
+                "repeats": repeats,
+                "tags": tags,
             }},
         },
         {
@@ -135,6 +159,11 @@ fn tools() -> Value {
                 "description": text("Longer notes"),
                 "delete": { "type": "boolean" },
                 "restore": { "type": "boolean" },
+                "sprint": text("A sprint id, \"current\", or \"none\" to take it out of its sprint"),
+                "points": points,
+                "parent": parent,
+                "repeats": repeats,
+                "tags": { "type": "array", "items": { "type": "string" }, "description": "Replaces the tags; [] clears them" },
             }},
         },
         {
@@ -146,6 +175,9 @@ fn tools() -> Value {
                 "project": text("A registered project slug"),
                 "query": text("Words in the title or description, or a task id"),
                 "due_before": text(DATES),
+                "sprint": sprint,
+                "tag": text("Only tasks with this tag"),
+                "parent": text("Only the subtasks of this task"),
             }},
         },
         {
@@ -189,6 +221,44 @@ fn tools() -> Value {
                 "period": { "type": "string", "enum": ["today", "week"], "description": "Defaults to today" },
             }},
         },
+        {
+            "name": "add_sprint",
+            "description": "Start a sprint: a named, time-boxed set of tasks with a goal. Put tasks in it with add_task or update_task (sprint).",
+            "inputSchema": { "type": "object", "required": ["name"], "properties": {
+                "name": text("Like \"Sprint 12\" or \"Checkout v2\""),
+                "project": text("A registered project slug"),
+                "start": text(&format!("First day; defaults to today. {DATES}")),
+                "end": text("Last day, a date or +14d from the start; defaults to two weeks"),
+                "goal": text("What the sprint should achieve"),
+            }},
+        },
+        {
+            "name": "list_sprints",
+            "description": "Open sprints (or all with all=true), with progress: done and scope (points, or tasks when nothing has points), days left, state.",
+            "annotations": read_only,
+            "inputSchema": { "type": "object", "properties": { "all": { "type": "boolean" } } },
+        },
+        {
+            "name": "sprint",
+            "description": "One sprint in detail: progress, its open tasks, and a burndown (remaining work at the end of each day, with the ideal line). Good for sprint charts and reviews.",
+            "annotations": read_only,
+            "inputSchema": { "type": "object", "properties": { "sprint": text("A sprint id, or \"current\" (the default)") } },
+        },
+        {
+            "name": "close_sprint",
+            "description": "Close a sprint. Its unfinished tasks are listed in the answer, to move to the next sprint or back to the backlog.",
+            "inputSchema": { "type": "object", "required": ["sprint"], "properties": { "sprint": sprint } },
+        },
+        {
+            "name": "start_timer",
+            "description": "Track time on a task (stops any running timer). A task in backlog or todo moves to doing. Use when the user starts focused work on a task.",
+            "inputSchema": { "type": "object", "required": ["id"], "properties": { "id": id } },
+        },
+        {
+            "name": "stop_timer",
+            "description": "Stop the running timer; returns this session's time and the task's total.",
+            "inputSchema": { "type": "object", "properties": {} },
+        },
     ])
 }
 
@@ -214,7 +284,8 @@ mod tests {
         assert_eq!(handle(&db, r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#), None);
         let names: Vec<String> = rpc(&db, "tools/list", json!({}))["result"]["tools"].as_array().unwrap()
             .iter().map(|t| t["name"].as_str().unwrap().to_string()).collect();
-        assert_eq!(names, ["add_task", "move_task", "update_task", "list_tasks", "add_note", "add_project", "list_projects", "facts", "report"]);
+        assert_eq!(names, ["add_task", "move_task", "update_task", "list_tasks", "add_note", "add_project", "list_projects", "facts", "report",
+            "add_sprint", "list_sprints", "sprint", "close_sprint", "start_timer", "stop_timer"]);
         assert_eq!(rpc(&db, "nope", json!({}))["error"]["code"], -32601);
         assert_eq!(handle(&db, "{not json").unwrap()["error"]["code"], -32700);
     }

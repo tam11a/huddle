@@ -15,7 +15,12 @@ The board lives in one SQLite file, managed by `huddle`. Use the huddle MCP tool
 | `list_tasks` | `list [--status s\|open\|all] [--project p] [--query words] [--due-before d]` | Open tasks by default, most urgent first |
 | `add_note` | `note "<text>" [--kind note\|decision\|report] [--task id] [--project p]` | Save a note; `report` notes are read back by the next stand-up |
 | `add_project` / `list_projects` | `project add <slug> [path]` / `project list` | Register a repo (path defaults to the current folder); your git commits there feed the stand-up |
-| `facts` | `facts last_workday\|today\|week` | Everything a stand-up or review needs: done, moved, doing, review, blocked, due today, overdue, decisions, your commits, the last report |
+| `facts` | `facts last_workday\|today\|week` | Everything a stand-up or review needs: done, moved, doing, review, blocked, due today, overdue, decisions, your commits, the last report, time tracked, running sprints |
+| `report` | `report [today\|week]` | The numbers for a report: done per day, streak, cycle time, hours blocked, per project, sitting still, carry-overs, time tracked |
+| `add_sprint` / `list_sprints` / `sprint` / `close_sprint` | `sprint add "<name>" [--project p] [--start d] [--end d] [--goal text]`, `sprint list [--all]`, `sprint show <id\|current>`, `sprint close <id>` | Time-boxed sprints with a goal; `sprint` gives progress and a burndown |
+| `start_timer` / `stop_timer` | `start <id>` / `stop` | Track time on a task; one timer runs at a time |
+
+Tasks can also have a sprint (`sprint`: an id or `current`), story `points`, a `parent` (making them subtasks), `repeats` (`daily`, `weekdays`, `weekly`, `monthly`: finishing one makes the next) and `tags`.
 
 Priorities: `urgent`, `high`, `normal`, `low`. Dates: `2026-10-31`, `2026-10-31T09:30`, `today`, `tomorrow 9:30`, `fri`, `+2h`. A date with no time means 18:00.
 
@@ -28,6 +33,7 @@ Priorities: `urgent`, `high`, `normal`, `low`. Dates: `2026-10-31`, `2026-10-31T
 - If the current folder is a git repo that isn't registered (`list_projects`), offer once to register it, so its commits show up in stand-ups. Registering adds a post-commit hook: a commit naming `#12` starts that task, `fixes #12` finishes it.
 - Ask before creating or changing more than one task at a time.
 - If the user wants to see the whole board, tell them to run `huddle` with no arguments in their terminal.
+- When the user says they're starting focused work on a task, `start_timer` it; when they stop or switch, `stop_timer` (starting another stops the first).
 
 ## Rituals
 
@@ -76,6 +82,18 @@ Use the matching one when the user asks for it. Anything the user adds after the
 2. If you can publish a page here (an Artifact tool), make it a one-page report with real charts: tasks done per day (bars), the totals as stat tiles (done, streak, cycle time, hours blocked, open and overdue), done and open per project, what's sitting still, and what carries over. Use only the numbers from `report` and `facts`.
 3. Otherwise, write it as markdown: the totals in one line, a bar chart of done per day drawn with `█`, then sitting still and carry-overs as short lists.
 4. Tell the user they can press `r` in the `huddle` board for the same report in the terminal.
+
+### Sprint planning ("plan a sprint", "start a sprint")
+
+1. `list_tasks` (open) and `list_sprints`. If a sprint is still open, say so and offer to close it first.
+2. Propose: a name, the dates (default two weeks from today), a one-line goal, and the tasks to include as a table: id · title · points (suggest points where missing: 1, 2, 3, 5, 8). Keep the total near what got done in past sprints (`list_sprints` with `all`), if there are any.
+3. Ask "Start it?" and stop. On yes, `add_sprint`, then `update_task` each chosen task with `sprint: "current"` and its points. Confirm in one line.
+
+### Sprint review ("how's the sprint going", "close the sprint")
+
+1. Get `sprint` for `current` (or the id given).
+2. Say: the goal, done vs scope, days left, and whether the burndown is ahead of or behind the ideal line. If you can publish a page here, chart the burndown (remaining and ideal per day).
+3. To close: list what's unfinished, ask where it goes (next sprint, backlog), and only on yes `close_sprint` and move those tasks.
 
 ### Plan from a document
 

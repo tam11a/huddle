@@ -17,6 +17,8 @@ pub struct Board {
     pub cols: Vec<Vec<Task>>,
     pub per_day: Vec<u64>,
     pub projects: Vec<ProjectStat>,
+    /// sprints running now, with their progress
+    pub sprints: Vec<Value>,
 }
 
 pub fn load_board(db: &Connection, now: i64) -> Result<Board> {
@@ -27,6 +29,7 @@ pub fn load_board(db: &Connection, now: i64) -> Result<Board> {
         cols: STATUSES.iter().map(|s| tasks.iter().filter(|t| t.status == *s).cloned().collect()).collect(),
         per_day: board::done_per_day(db, 14, now)?,
         projects: board::project_stats(db, start_of_day(start_of_day(now) - 6 * DAY))?,
+        sprints: board::list_sprints(db, false, now)?.into_iter().filter(|s| s["state"] == "running").collect(),
     })
 }
 
@@ -37,6 +40,8 @@ pub enum Action {
     Title(i64),
     Description(i64),
     Project(i64),
+    Points(i64),
+    Tags(i64),
     Due(i64),
     Delete(i64),
 }
@@ -70,6 +75,7 @@ pub struct State {
     pub prompt: Option<Prompt>,
     pub standup: Option<(Value, Value)>,
     pub report: Option<(Value, Instant)>,
+    pub sprint_view: Option<(Value, Instant)>,
     pub help: bool,
     pub msg: String,
     pub err: bool,
@@ -100,6 +106,7 @@ impl State {
             prompt: None,
             standup: None,
             report: None,
+            sprint_view: None,
             help: false,
             msg: String::new(),
             err: false,
@@ -172,9 +179,10 @@ fn follow(s: &mut State, db: &Connection, id: i64, now: i64) -> Result<()> {
     Ok(())
 }
 
-/// Ends the focus session when its time is up.
-pub fn tick(s: &mut State, t: Instant) {
+/// Ends the focus session when its time is up, and stops its timer.
+pub fn tick(s: &mut State, db: &Connection, t: Instant, now: i64) {
     if let Some(f) = s.focus.take_if(|f| t.saturating_duration_since(f.started) >= f.length) {
+        let _ = board::stop_timer(db, now);
         s.msg = format!("focus done: {} min on {} {}", f.length.as_secs() / 60, fmt_id(f.id), f.title);
         s.err = false;
         s.toast = t;
@@ -196,7 +204,7 @@ fn undo(s: &mut State, db: &Connection, now: i64) -> Result<()> {
             let t = board::update_task(db, &p.id.to_string(), &Patch {
                 status: Some(&p.status), blocked_reason: p.blocked_reason.as_deref(), title: Some(&p.title), description: Some(&p.description),
                 priority: Some(&priority), due: Some(&due), project: Some(&project), restore: cur.deleted_at.is_some() && p.deleted_at.is_none(),
-                delete: false,
+                delete: false, ..Default::default()
             }, now)?;
             follow(s, db, t.id, now)?;
             s.msg = format!("{} {}: undone", fmt_id(t.id), t.title);
@@ -232,10 +240,11 @@ pub fn press(s: &mut State, k: &str, db: &Connection, now: i64) {
     s.err = false;
     let r = if s.prompt.is_some() {
         type_into(s, k, db, now)
-    } else if s.help || s.standup.is_some() || s.report.is_some() {
+    } else if s.help || s.standup.is_some() || s.report.is_some() || s.sprint_view.is_some() {
         s.help = false;
         s.standup = None;
         s.report = None;
+        s.sprint_view = None;
         Ok(())
     } else {
         board_key(s, k, db, now)
@@ -294,6 +303,8 @@ fn submit(s: &mut State, a: Action, v: &str, db: &Connection, now: i64) -> Resul
             s.filter = v.to_string();
             Ok(())
         }
+        Action::Points(id) => change(s, db, id, &Patch { points: Some(v), ..Default::default() }, if v.is_empty() || v == "none" { "points cleared" } else { "points set" }, false, now),
+        Action::Tags(id) => change(s, db, id, &Patch { tags: Some(v), ..Default::default() }, if v.is_empty() { "tags cleared" } else { "tags set" }, false, now),
         Action::Description(id) => change(s, db, id, &Patch { description: Some(v), ..Default::default() }, "description saved", false, now),
         Action::Project(id) => change(s, db, id, &Patch { project: Some(v), ..Default::default() }, if v.is_empty() { "project cleared" } else { "project set" }, false, now),
         Action::Block(id) => change(s, db, id, &Patch { status: Some("blocked"), blocked_reason: Some(v), ..Default::default() }, "→ blocked", false, now),
@@ -320,6 +331,7 @@ fn board_key(s: &mut State, k: &str, db: &Connection, now: i64) -> Result<()> {
         "?" => s.help = true,
         "s" => s.standup = Some((board::facts(db, "last_workday", now)?, board::facts(db, "today", now)?)),
         "r" => s.report = Some((board::report(db, "week", now)?, Instant::now())),
+        "S" => s.sprint_view = Some((board::sprint_detail(db, "current", now)?, Instant::now())),
         "a" => ask(s, "New task", "", Action::Add),
         "u" => undo(s, db, now)?,
         "/" => {
@@ -342,7 +354,8 @@ fn board_key(s: &mut State, k: &str, db: &Connection, now: i64) -> Result<()> {
         }
         "f" if s.focus.is_some() => {
             let f = s.focus.take().unwrap();
-            s.msg = format!("focus stopped after {} min on {}", f.started.elapsed().as_secs() / 60, fmt_id(f.id));
+            let spent = board::stop_timer(db, now).ok().and_then(|v| v["time_spent"].as_str().map(String::from)).unwrap_or_default();
+            s.msg = format!("focus stopped after {} min on {} ({spent} in all)", f.started.elapsed().as_secs() / 60, fmt_id(f.id));
         }
         _ => {
             let Some(t) = t else { return Ok(()) }; // the rest act on the selected task
@@ -361,10 +374,11 @@ fn board_key(s: &mut State, k: &str, db: &Connection, now: i64) -> Result<()> {
                     let label = format!("Project ({}; empty clears)", if known.is_empty() { "none registered".into() } else { known.join(", ") });
                     ask(s, &label, t.project.as_deref().unwrap_or(""), Action::Project(t.id));
                 }
+                "n" => ask(s, "Points (a number; none clears)", &t.points.map(|p| p.to_string()).unwrap_or_default(), Action::Points(t.id)),
+                "g" => ask(s, "Tags (comma-separated; empty clears)", &t.tags.join(", "), Action::Tags(t.id)),
                 "f" => {
-                    if t.status == "backlog" || t.status == "todo" {
-                        change(s, db, t.id, &to("doing"), "→ doing", false, now)?;
-                    }
+                    board::start_timer(db, &t.id.to_string(), now)?; // also moves backlog/todo to doing
+                    s.flash = Some((t.id, Instant::now()));
                     s.focus = Some(Focus { id: t.id, title: t.title.clone(), started: Instant::now(), length: FOCUS });
                     s.msg = format!("focus: {} min on {} {}", FOCUS.as_secs() / 60, fmt_id(t.id), t.title);
                 }
@@ -419,7 +433,7 @@ fn run(term: &mut ratatui::DefaultTerminal, db: &Connection, s: &mut State, file
             loaded = Instant::now();
         }
         let t = Instant::now();
-        tick(s, t);
+        tick(s, db, t, now());
         term.draw(|f| ui::draw(f, s, &b, &ui::View { now: now(), t, file }))?;
         // ~30 fps while something moves, otherwise sleep until the next refresh or key
         if !event::poll(ui::next_frame(s, t).min(REFRESH.saturating_sub(loaded.elapsed())))? {
@@ -532,8 +546,29 @@ mod tests {
         assert_eq!(status(1).status, "doing");
         assert!(has(&screen(&mut s, &load_board(&db, now()).unwrap(), now()), "focus #1"));
         s.focus.as_mut().unwrap().started -= Duration::from_secs(26 * 60);
-        tick(&mut s, Instant::now());
+        tick(&mut s, &db, Instant::now(), now());
+        assert!(board::get_task(&db, 1).unwrap().spent > 0 || board::running_timer(&db).unwrap().is_none());
         assert!(s.focus.is_none() && s.msg.starts_with("focus done: 25 min on #1"));
+    }
+
+    #[test]
+    fn sprint_screen_points_and_tags() {
+        let db = board::open_db(":memory:").unwrap();
+        board::add_sprint(&db, "Sprint 1", None, None, None, Some("Ship checkout"), now()).unwrap();
+        board::add_task(&db, &NewTask { title: "Card form", status: Some("doing"), sprint: Some("current"), ..Default::default() }, now()).unwrap();
+        let mut s = State::new();
+        keys(&mut s, &db, &["n", "5", "return", "g"]);
+        keys(&mut s, &db, &typed("ui, bug").iter().map(String::as_str).collect::<Vec<_>>());
+        keys(&mut s, &db, &["return"]);
+        let t = board::get_task(&db, 1).unwrap();
+        assert_eq!((t.points, t.tags.clone()), (Some(5), vec!["bug".to_string(), "ui".to_string()]));
+        let lines = screen(&mut s, &load_board(&db, now()).unwrap(), now());
+        assert!(has(&lines, "5p") && has(&lines, "•bug") && has(&lines, "◆ Sprint 1 0/5 points"), "{}", lines.join("\n"));
+        keys(&mut s, &db, &["S"]);
+        let lines = screen(&mut s, &load_board(&db, now()).unwrap(), now());
+        assert!(has(&lines, "burndown") && has(&lines, "Ship checkout") && has(&lines, "#1 Card form"));
+        keys(&mut s, &db, &["q"]);
+        assert!(s.sprint_view.is_none() && !s.quit);
     }
 
     #[test]
